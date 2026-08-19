@@ -92,6 +92,17 @@ python3 -m a_shape_tool.cli \
 
 ---
 
+## 🖼️ Visual Test Showcase
+
+> Full test results and diagnostics are available in the [test_results/ directory](test_results/README.md).
+
+| Forward Quantile Ribbon | Top Matched Candlestick Grid |
+| :---: | :---: |
+| ![Distribution Ribbon](test_results/xauusd/distribution.png) | ![Candlestick Grid](test_results/xauusd/top_matches_ohlc.png) |
+
+
+---
+
 ## 🔬 Walk-Forward Validation
 
 Evaluate out-of-sample statistical power across historical regimes without lookahead leakage:

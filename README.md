@@ -92,6 +92,17 @@ python3 -m a_shape_tool.cli \
 
 ---
 
+## 🖼️ 测试结果图表展示 (Test Showcase)
+
+> 详细的黄金与比特币回测结果与图表请查阅 [test_results/ 目录](test_results/README.md)。
+
+| 走势概率分位带 (Distribution Ribbon) | Top 相似形态 K 线对比网格 (Candlestick Grid) |
+| :---: | :---: |
+| ![Distribution Ribbon](test_results/xauusd/distribution.png) | ![Candlestick Grid](test_results/xauusd/top_matches_ohlc.png) |
+
+
+---
+
 ## 🔬 Walk-Forward 滚动验证
 
 要评估形态预测是否具备统计显著性，绝不能看单次静态拟合，必须执行严格杜绝未来函数的滚动验证：
