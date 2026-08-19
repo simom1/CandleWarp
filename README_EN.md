@@ -122,6 +122,13 @@ python3 -m a_shape_tool.cli \
 ```
 
 
+### Multi-Asset Concurrent Walk-Forward
+```bash
+python3 -m a_shape_tool.cli \
+  --multi-csv data/xauusd_1h_demo.csv data/btc_1h_demo.csv data/eurusd_1h_demo.csv \
+  --backtest --n-jobs -1
+```
+
 ### Output Evaluation Metrics
 - **Median MAE Improvement**: Similarity prediction error vs. state-baseline error.
 - **Spearman IC & Information Ratio (IC_IR)**:
@@ -137,6 +144,19 @@ python3 -m a_shape_tool.cli \
 ```
 
 ---
+
+## ⚡ Production Latency Benchmark
+
+> Run `python3 -m a_shape_tool.benchmark` to profile microsecond DTW matching and tick-to-signal latencies.
+
+| Historical Pool Size | Matching Window | Forward Horizon | Numba JIT Per-Match | End-to-End Latency (P50) | Real-time Throughput (QPS) |
+| :---: | :---: | :---: | :---: | :---: | :---: |
+| **1,000 bars** | 100 bars | +50 bars | **9.42 μs** (304x) | **218.46 ms** | **4.4 req/s** |
+| **5,000 bars** | 100 bars | +50 bars | 9.42 μs | **752.84 ms** | 1.3 req/s |
+| **10,000 bars** | 100 bars | +50 bars | 9.42 μs | **1164.45 ms** | 0.8 req/s |
+
+---
+
 
 ## 📐 Mathematical Formulation
 

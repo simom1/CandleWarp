@@ -13,7 +13,13 @@ def main() -> None:
         description="Target-A historical OHLC shape similarity distribution demo."
     )
     parser.add_argument("--csv", help="Input OHLC CSV path.")
+    parser.add_argument(
+        "--multi-csv",
+        nargs="+",
+        help="Multiple input OHLC CSV paths for concurrent multi-asset walk-forward evaluation.",
+    )
     parser.add_argument("--make-sample", help="Write deterministic sample OHLC CSV to this path.")
+
     parser.add_argument(
         "--asset",
         choices=["xauusd", "btc", "eurusd", "generic"],
@@ -193,8 +199,8 @@ def main() -> None:
             return
 
 
-    if not args.csv:
-        parser.error("--csv is required unless only --make-sample is used.")
+    if not args.csv and not args.multi_csv:
+        parser.error("--csv or --multi-csv is required unless only --make-sample is used.")
 
     config = SimilarityConfig(
         timeframe=args.timeframe,
@@ -221,7 +227,30 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    if args.multi_csv:
+        from .evaluation import BacktestConfig, run_multi_dataset_walk_forward, summarize_multi_dataset_results
+        datasets = {Path(p).stem: load_ohlc_csv(p) for p in args.multi_csv}
+        bt_config = BacktestConfig(
+            similarity=config,
+            min_history=args.min_history,
+            stride=args.stride,
+            cost_bps=args.cost_bps,
+            edge_threshold_bps=args.edge_threshold_bps,
+            max_trials=args.max_trials,
+            n_jobs=args.n_jobs,
+        )
+        print(f"Running Multi-Asset Parallel Walk-Forward across {len(datasets)} datasets...")
+        multi_results = run_multi_dataset_walk_forward(datasets, bt_config)
+        summary_table = summarize_multi_dataset_results(multi_results)
+        print("\n" + "=" * 80)
+        print("          Multi-Asset Parallel Walk-Forward Cross-Comparison")
+        print("=" * 80)
+        print(summary_table.to_string(index=False))
+        summary_table.to_csv(output_dir / "multi_asset_backtest_summary.csv", index=False)
+        return
+
     df = load_ohlc_csv(args.csv)
+
 
     if args.most_common:
         from .common import run_most_common, optimize_kmeans_clusters

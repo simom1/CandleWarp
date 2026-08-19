@@ -284,6 +284,59 @@ def run_walk_forward(df: pd.DataFrame, config: BacktestConfig) -> BacktestResult
     )
 
 
+def run_multi_dataset_walk_forward(
+    datasets: dict[str, pd.DataFrame],
+    config: BacktestConfig,
+    n_workers: int | None = None,
+) -> dict[str, BacktestResult]:
+    """Run parallel walk-forward evaluations concurrently across multiple assets/timeframes."""
+    import os
+    from concurrent.futures import ThreadPoolExecutor
+
+    results: dict[str, BacktestResult] = {}
+    actual_workers = min(
+        len(datasets), os.cpu_count() or 4 if n_workers in (None, -1) else n_workers
+    )
+
+    if actual_workers > 1 and len(datasets) > 1:
+        with ThreadPoolExecutor(max_workers=actual_workers) as executor:
+            future_to_name = {
+                executor.submit(run_walk_forward, df, config): name
+                for name, df in datasets.items()
+            }
+            for future in future_to_name:
+                name = future_to_name[future]
+                results[name] = future.result()
+    else:
+        for name, df in datasets.items():
+            results[name] = run_walk_forward(df, config)
+
+    return results
+
+
+def summarize_multi_dataset_results(results: dict[str, BacktestResult]) -> pd.DataFrame:
+    """Produce a cross-asset comparison table of walk-forward evaluation metrics."""
+    rows = []
+    for name, res in results.items():
+        s = res.summary
+        rows.append({
+            "Asset / Dataset": name,
+            "Trials": s["trials"],
+            "MAE Impv (%)": f"{s['median_mae_improvement_pct'] * 100.0:+.2f}%",
+            "Spearman IC": f"{s['spearman_ic']:.4f}",
+            "IC_IR": f"{s.get('ic_ir', 0.0):.3f}",
+            "IC t-stat": f"{s.get('ic_t_stat', 0.0):.2f}",
+            "25-75% Calib": f"{s['coverage_25_75'] * 100.0:.1f}%",
+            "Dir Hit Rate": f"{s['direction_hit_rate'] * 100.0:.1f}%",
+            "Trade Win Rate": f"{s['trade_win_rate'] * 100.0:.1f}%" if s["trades"] > 0 else "N/A",
+            "Profit Factor": f"{s['profit_factor']:.2f}" if s["trades"] > 0 else "N/A",
+            "Asym Trades": s.get("asym_trades", 0),
+            "Asym Win Rate": f"{s.get('asym_trade_win_rate', 0.0) * 100.0:.1f}%" if s.get("asym_trades", 0) > 0 else "N/A",
+        })
+    return pd.DataFrame(rows)
+
+
+
 
 def prepare_walk_forward_frame(
     df: pd.DataFrame,

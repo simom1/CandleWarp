@@ -116,11 +116,11 @@ def run_similarity(df: pd.DataFrame, config: SimilarityConfig) -> SimilarityResu
     query_end = resolve_query_end(base, config.query_end)
     if config.history_only:
         base = base.iloc[: query_end + 1].copy().reset_index(drop=True)
-        query_end = len(base) - 1
-
-    working = add_state_columns(base, config)
+        query_end = resolve_query_end(base, config.query_end)
+    working = add_state_columns(base, config, query_end_index=query_end)
 
     query_start = query_end - config.window + 1
+
     if query_start < 0:
         raise ValueError("Query window starts before the first row; reduce --window.")
 
@@ -141,7 +141,7 @@ def run_similarity(df: pd.DataFrame, config: SimilarityConfig) -> SimilarityResu
         use_fvg=config.use_fvg,
         fvg_weight=config.fvg_weight,
     )
-    feature_dim = 5 + (1 if config.use_volume else 0) + (2 if config.use_fvg else 0)
+    feature_dim = len(query_vector) // config.window
 
     candidates = iter_candidate_windows(working, query_start, query_end, config)
 
@@ -296,7 +296,11 @@ def compute_atr(df: pd.DataFrame, period: int) -> pd.Series:
     return true_range.rolling(period, min_periods=period).mean()
 
 
-def add_state_columns(df: pd.DataFrame, config: SimilarityConfig) -> pd.DataFrame:
+def add_state_columns(
+    df: pd.DataFrame,
+    config: SimilarityConfig,
+    query_end_index: int | None = None,
+) -> pd.DataFrame:
     working = df.copy().reset_index(drop=True)
     working["atr"] = compute_atr(working, config.atr_period)
     working["trend_bin"] = compute_trend_bin(
@@ -304,9 +308,16 @@ def add_state_columns(df: pd.DataFrame, config: SimilarityConfig) -> pd.DataFram
         lookback=config.trend_lookback,
         flat_threshold=config.flat_threshold,
     )
-    working["vol_bin"] = compute_volatility_bin(working["atr"] / working["close"])
+    atr_pct = (working["atr"] / working["close"]).replace([np.inf, -np.inf], np.nan)
+    if query_end_index is not None and config.history_only:
+        # Causal volatility quantile threshold estimation
+        cuts = compute_volatility_cuts(atr_pct.iloc[: query_end_index + 1])
+    else:
+        cuts = compute_volatility_cuts(atr_pct)
+    working["vol_bin"] = apply_volatility_cuts(atr_pct, cuts)
     working["state"] = working["trend_bin"] + "/" + working["vol_bin"]
     return working
+
 
 
 def compute_trend_bin(close: pd.Series, lookback: int, flat_threshold: float) -> pd.Series:
@@ -399,14 +410,18 @@ def encode_window(
 
     if use_volume:
         if "volume" in window.columns and (window["volume"] > 0).any():
-            vol_arr = window["volume"].to_numpy(dtype=float)
-            med_vol = np.median(vol_arr[vol_arr > 0]) if np.any(vol_arr > 0) else 1.0
-            rel_vol = np.clip((vol_arr / (med_vol + 1e-8) - 1.0), -3.0, 5.0) * volume_weight
+            from .vp_fvg import compute_volume_profile
+            vp_res = compute_volume_profile(window, atr)
+            poc_seq = np.full(len(window), vp_res.poc_rel * volume_weight, dtype=float)
+            vah_seq = np.full(len(window), vp_res.vah_rel * volume_weight, dtype=float)
+            val_seq = np.full(len(window), vp_res.val_rel * volume_weight, dtype=float)
+            skew_seq = np.full(len(window), vp_res.vp_skew * volume_weight, dtype=float)
+            feature_cols.extend([poc_seq, vah_seq, val_seq, skew_seq])
         else:
-            rel_vol = np.zeros(len(window), dtype=float)
-        feature_cols.append(rel_vol)
+            feature_cols.extend([np.zeros(len(window), dtype=float) for _ in range(4)])
 
     if use_fvg:
+        from .vp_fvg import detect_unmitigated_fvg
         fvg_res = detect_unmitigated_fvg(window, atr)
         bias_seq = np.full(len(window), fvg_res.net_fvg_bias * fvg_weight, dtype=float)
         dist_seq = np.full(len(window), fvg_res.nearest_fvg_dist * fvg_weight, dtype=float)
@@ -417,6 +432,7 @@ def encode_window(
         raise ValueError("Window encoding contains non-finite values.")
 
     return encoded.ravel()
+
 
 
 def iter_candidate_windows(
