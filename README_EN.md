@@ -23,6 +23,7 @@
 - **⚡ Sub-Millisecond 2D Sakoe-Chiba DTW**: JIT-compiled with Numba delivering **>300x acceleration** (`~0.009ms` per match) with LB_Keogh lower-bounding pruning and automatic NumPy fallback.
 - **📏 Dimensionless Relative Space**: OHLC windows are projected into ATR-normalized price coordinates and body-ratio geometry, eliminating cross-era price level and volatility scale distortions.
 - **🔍 Volume Profile & FVG Modalities**: Incorporates Point of Control (POC), Value Area (VAH/VAL), Volume Skewness, and Fair Value Gaps (3-bar unmitigated liquidity voids).
+- **💎 Zero-Dependency Dark Mode Client Dashboard**: Features multi-timeframe tab switching (1min, 5min, 15min, 30min, 1h, 4h, 1d), Base64 offline self-contained bundling for institutional presentations.
 - **🛡️ Dual Confidence Gating**: Rejects low-confidence noise with minimum sample thresholds and distance outlier cutoffs.
 - **🎯 Softmax Distance-Weighted Quantiles**: Replaces uniform sampling with distance-weighted probabilistic ribbons (Q10, Q25, Q50, Q75, Q90).
 - **🔬 Zero-Lookahead Walk-Forward Engine**: Strictly causal rolling evaluation reporting Spearman IC, Information Ratio (IC_IR), t-statistics, and asymmetric risk-reward expectancy.
@@ -40,7 +41,7 @@ flowchart TD
     D --> E[Diverse Match Selection\nTop-K with Min-Gap Spacing]
     E --> F[Forward Path & Quantile Ribbon Extraction\n10%-90%, 25%-75%, Median Path]
     F --> G[Walk-Forward Validation\nSpearman IC, IC_IR, t-stat, PnL]
-    F --> H[Interactive Visualization & HTML Report\nDistribution Ribbon, Candle Grids]
+    F --> H[Interactive Visual Dashboard\nMulti-TF Tabs, Distribution Ribbon, Candle Grids]
 ```
 
 ---
@@ -57,15 +58,11 @@ pip install -r requirements.txt
 
 ### 2. Built-in Test Datasets
 
-The `data/` directory includes pre-generated standard 1H benchmark datasets:
-- `data/xauusd_1h_demo.csv`: Gold (XAUUSD) 1H dataset with intraday session volume profiles and volatility shifts.
-- `data/btc_1h_demo.csv`: Bitcoin (BTCUSD) 1H dataset with strong momentum and Fair Value Gaps.
-- `data/eurusd_1h_demo.csv`: EURUSD 1H dataset with high mean-reversion characteristics.
-
-You can also synthesize custom datasets anytime:
-```bash
-python3 -m a_shape_tool.cli --make-sample data/xauusd_custom.csv --asset xauusd --rows 3000
-```
+The `data/` directory includes standard benchmark datasets and live MT5 multi-timeframe series:
+- `data/xauusd_1h_demo.csv`: Gold (XAUUSD) 1H dataset
+- `data/btc_1h_demo.csv`: Bitcoin (BTCUSD) 1H dataset
+- `data/eurusd_1h_demo.csv`: EURUSD 1H dataset
+- `data/xauusd_*_real.csv`: Live MT5 Gold full-cycle series (1m, 5m, 15m, 30m, 1h, 4h, 1d)
 
 ### 3. Single-Window Pattern Distribution Query
 
@@ -92,14 +89,14 @@ python3 -m a_shape_tool.cli \
 
 ---
 
-## 🖼️ Visual Test Showcase
+## 🖼️ Visual Test Showcase & Client Dashboard
 
-> Full test results and diagnostics are available in the [test_results/ directory](test_results/README.md).
+> 👉 **[XAUUSD 7-Timeframe (1m~1d) Live Market Benchmark Report](test_results/multi_timeframe_xauusd/README.md)**  
+> 💻 **[Zero-Dependency Standalone Dashboard: test_results/client_dashboard.html](test_results/client_dashboard.html)**
 
 | Forward Quantile Ribbon | Top Matched Candlestick Grid |
 | :---: | :---: |
 | ![Distribution Ribbon](test_results/xauusd/distribution.png) | ![Candlestick Grid](test_results/xauusd/top_matches_ohlc.png) |
-
 
 ---
 
@@ -175,6 +172,7 @@ CandleWarp/
 ├── a_shape_tool/
 │   ├── cli.py             # Unified CLI interface
 │   ├── core.py            # Feature encoding, state stratification & matching engine
+│   ├── dashboard.py       # Zero-dependency Dark Mode Client Dashboard generator
 │   ├── dtw.py             # Numba JIT accelerated 2D Sakoe-Chiba DTW & LB_Keogh
 │   ├── vp_fvg.py          # Volume Profile & Fair Value Gap microstructure modules
 │   ├── evaluation.py      # Zero-lookahead Walk-Forward engine & IC_IR verification
@@ -183,6 +181,9 @@ CandleWarp/
 │   ├── plotting.py        # Distribution ribbons & candlestick grid rendering
 │   ├── risk.py            # Risk management & trade execution logic
 │   └── sample_data.py     # Realistic synthetic OHLCV generator
+├── test_results/
+│   ├── client_dashboard.html      # Standalone interactive dashboard (open in browser)
+│   └── multi_timeframe_xauusd/   # Gold 7-timeframe full benchmark reports
 ├── data/
 │   ├── xauusd_1h_demo.csv # Gold 1H official demo dataset
 │   ├── btc_1h_demo.csv    # Bitcoin 1H official demo dataset

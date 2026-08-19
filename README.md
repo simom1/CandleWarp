@@ -23,6 +23,7 @@
 - **⚡ 毫秒级 2D Sakoe-Chiba DTW 矩阵算子**：基于 Numba JIT 深度优化编译，单次匹配仅需 **`0.009ms`（加速超 330 倍）**，结合 LB_Keogh 理论下界剪枝，支持海量 K 线秒级全局检索，内置 NumPy 优雅自动降级机制。
 - **📏 无量纲相对空间映射**：将 OHLC 窗口投影至 ATR 归一化价格坐标与实体比例空间，消除不同历史时期、不同价格点位与波动率周期的绝对量纲失真。
 - **🔍 Volume Profile (筹码分布) 与 FVG 因子增强**：不仅看“形”，更看“量”与“微观结构”，提取筹码峰 (POC)、70% 价值区 (VAH/VAL)、成交量偏度以及三根 K 线未回补流动性失衡区 (Fair Value Gap)。
+- **💎 零依赖暗黑主题客户交互看板**：内置 1min/5min/15min/30min/1h/4h/1d 全周期即时切换，Base64 离线免服务器打包，直接双击或发送客户即可查看机构级走势分布矩阵。
 - **🛡️ 双重置信度闸门机制**：拒绝低置信度噪点匹配，设定最小有效样本阈值与最大距离截断，杜绝弱相关样本强行凑数。
 - **🎯 Softmax 距离加权概率分位数**：用加权概率分布取代机械等权平均，生成更逼近真实物理路径的概率分位带（Q10, Q25, Q50, Q75, Q90）。
 - **🔬 严谨无未来函数 Walk-Forward 验证**：严格时间因果隔离的滚动回测体系，全面评估 Spearman IC 秩相关系数、信息比率 IC_IR、t 显著性统计量以及不对称期望收益。
@@ -40,7 +41,7 @@ flowchart TD
     D --> E[多样性片段提取\nTop-K 相似窗口 + Min-Gap 间距]
     E --> F[走势分布与分位带计算\n10%-90%, 25%-75%, 中位数路径]
     F --> G[Walk-Forward 滚动验证\nSpearman IC, IC_IR, t-stat, 扣费PnL]
-    F --> H[交互式全景可视化\n走势分布带, K线网格, HTML 报表]
+    F --> H[交互式全景可视化看板\n多周期切换, 走势分布带, K线网格]
 ```
 
 ---
@@ -57,15 +58,11 @@ pip install -r requirements.txt
 
 ### 2. 内置测试数据源
 
-仓库 `data/` 目录下已预置 3 类资产的 1H 标准测试数据：
-- `data/xauusd_1h_demo.csv`：黄金 1H 模拟数据（包含高波动、肥尾冲击与量价突增特征）
-- `data/btc_1h_demo.csv`：比特币 1H 模拟数据（包含强动量趋势与跳空失衡特征）
-- `data/eurusd_1h_demo.csv`：欧美外汇 1H 模拟数据（包含均值回归与盘整特征）
-
-也可以随时生成任意指定资产的测试集：
-```bash
-python3 -m a_shape_tool.cli --make-sample data/xauusd_custom.csv --asset xauusd --rows 3000
-```
+仓库 `data/` 目录下已预置黄金、比特币与外汇的标准测试数据集与 MT5 实盘多周期历史数据：
+- `data/xauusd_1h_demo.csv`：黄金 1H 标准测试数据
+- `data/btc_1h_demo.csv`：比特币 1H 标准测试数据
+- `data/eurusd_1h_demo.csv`：欧美外汇 1H 标准测试数据
+- `data/xauusd_*_real.csv`：实盘 MT5 黄金全周期历史数据 (1m, 5m, 15m, 30m, 1h, 4h, 1d)
 
 ### 3. 单窗口形态相似度与分布检索
 
@@ -92,14 +89,14 @@ python3 -m a_shape_tool.cli \
 
 ---
 
-## 🖼️ 测试结果图表展示 (Test Showcase)
+## 🖼️ 测试结果与多周期交互看板展示 (Test Showcase)
 
-> 详细的黄金与比特币回测结果与图表请查阅 [test_results/ 目录](test_results/README.md)。
+> 👉 **[点击查阅：XAUUSD 7大周期 (1m~1d) 实盘形态走势分布全景报告](test_results/multi_timeframe_xauusd/README.md)**  
+> 💻 **[离线单文件客户交互看板：test_results/client_dashboard.html](test_results/client_dashboard.html)**
 
 | 走势概率分位带 (Distribution Ribbon) | Top 相似形态 K 线对比网格 (Candlestick Grid) |
 | :---: | :---: |
 | ![Distribution Ribbon](test_results/xauusd/distribution.png) | ![Candlestick Grid](test_results/xauusd/top_matches_ohlc.png) |
-
 
 ---
 
@@ -136,8 +133,6 @@ python3 -m a_shape_tool.cli \
 ```math
 \mathrm{Asymmetry} = \frac{Q_{75} - Q_{50}}{Q_{50} - Q_{25}}
 ```
-
-仅在上行爆发空间显著大于下行潜在亏损时发出信号。
 
 ---
 
@@ -177,6 +172,7 @@ CandleWarp/
 ├── a_shape_tool/
 │   ├── cli.py             # 统一命令行交互调度入口
 │   ├── core.py            # 特征编码、状态分层与相似度检索主引擎
+│   ├── dashboard.py       # 零依赖暗黑主题客户交互看板生成器
 │   ├── dtw.py             # Numba JIT 加速 2D Sakoe-Chiba DTW 算法与 LB_Keogh
 │   ├── vp_fvg.py          # Volume Profile (筹码分布) 与 FVG 价格失衡因子模块
 │   ├── evaluation.py      # 无未来函数 Walk-Forward 滚动验证与 IC_IR 评估体系
@@ -185,6 +181,9 @@ CandleWarp/
 │   ├── plotting.py        # 走势分布分位带与多子图 K 线网格绘制
 │   ├── risk.py            # 动态风控与期望收益规则计算
 │   └── sample_data.py     # 真实特征多品种 OHLCV 数据生成器
+├── test_results/
+│   ├── client_dashboard.html      # 独立单文件客户交互看板 (双击即开)
+│   └── multi_timeframe_xauusd/   # 黄金 7 大周期全景实测报告
 ├── data/
 │   ├── xauusd_1h_demo.csv # 黄金 1H 官方测试数据集
 │   ├── btc_1h_demo.csv    # 比特币 1H 官方测试数据集
