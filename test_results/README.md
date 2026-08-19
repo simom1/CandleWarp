@@ -1,8 +1,11 @@
 # 📊 CandleWarp 测试结果与图表展示 (Test Results & Visual Showcase)
 
-本目录展示了使用 **`CandleWarp`** 对内置标准测试数据集（黄金 XAUUSD 与比特币 BTCUSD）进行形态相似度匹配与走势分布预测的实际输出。
+本目录展示了使用 **`CandleWarp`** 对内置标准测试数据集与 **MT5 实盘多周期黄金 (XAUUSD 1m/5m/15m/30m/1h/4h/1d)** 进行形态相似度匹配与走势分布预测的实际输出。
+
+> 👉 **[点击进入：XAUUSD 7大周期 (1m~1d) 实盘形态走势分布全景报告](multi_timeframe_xauusd/README.md)**
 
 ---
+
 
 ## 🪙 1. 黄金测试结果 (XAUUSD 1H Test Results)
 
