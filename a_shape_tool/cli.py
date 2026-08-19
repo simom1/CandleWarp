@@ -145,7 +145,14 @@ def main() -> None:
         type=int,
         help="Limit walk-forward trials for quick research runs.",
     )
+    parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=-1,
+        help="Number of parallel CPU workers for walk-forward evaluation (-1 for all cores). Default: -1.",
+    )
     parser.add_argument("--output-dir", default="output", help="Output directory.")
+
     # ── most-common mode ──
     parser.add_argument(
         "--most-common",
@@ -314,8 +321,10 @@ def main() -> None:
                 cost_bps=args.cost_bps,
                 edge_threshold_bps=args.edge_threshold_bps,
                 max_trials=args.max_trials,
+                n_jobs=args.n_jobs,
             ),
         )
+
         trials_path = output_dir / "backtest_trials.csv"
         buckets_path = output_dir / "backtest_buckets.csv"
         summary_path = output_dir / "backtest_summary.json"

@@ -28,6 +28,7 @@ class BacktestConfig:
     cost_bps: float = 0.0
     edge_threshold_bps: float = 0.0
     max_trials: int | None = None
+    n_jobs: int = 1
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,143 @@ class BacktestResult:
     buckets: pd.DataFrame
     skipped: int
     skip_reasons: dict
+
+
+def _evaluate_single_trial(
+    query_end: int,
+    working: pd.DataFrame,
+    features: np.ndarray,
+    terminal_returns: np.ndarray,
+    sim: SimilarityConfig,
+    config: BacktestConfig,
+    min_required: int,
+    effective_min_gap: int,
+    n_channels: int,
+) -> tuple[dict | None, str | None]:
+    """Evaluate a single walk-forward query window with zero lookahead."""
+    query_vector = features[query_end]
+    query_state = working.loc[query_end, "state"]
+    if not np.isfinite(query_vector).all() or "unknown" in str(query_state):
+        return None, "invalid_state"
+
+    query_start = query_end - sim.window + 1
+    candidate_end_max = min(query_start - 1, query_end - sim.horizon)
+    if candidate_end_max < sim.window - 1:
+        return None, "not_enough_history"
+
+    candidate_indices = np.arange(sim.window - 1, candidate_end_max + 1)
+    valid = (
+        np.isfinite(features[candidate_indices]).all(axis=1)
+        & np.isfinite(terminal_returns[candidate_indices])
+        & (working.loc[candidate_indices, "state"].to_numpy() == query_state)
+    )
+    candidate_indices = candidate_indices[valid]
+    if len(candidate_indices) < min_required:
+        return None, "not_enough_candidates"
+
+    # Fast Euclidean Pre-filter
+    distances = np.linalg.norm(features[candidate_indices] - query_vector, axis=1)
+
+    # Apply DTW re-ranking if enabled (dynamic n_channels, not hardcoded)
+    if sim.use_dtw:
+        pre_top_count = min(len(candidate_indices), sim.dtw_rerank_k)
+        pre_order = np.argsort(distances)[:pre_top_count]
+        pre_candidates = candidate_indices[pre_order]
+        query_matrix = query_vector.reshape(sim.window, n_channels)
+
+        dtw_dists = np.empty(pre_top_count, dtype=float)
+        for idx, cand_end in enumerate(pre_candidates):
+            cand_matrix = features[cand_end].reshape(sim.window, n_channels)
+            dtw_dists[idx] = dtw_distance_2d(query_matrix, cand_matrix, w=sim.dtw_warping_window)
+
+        top_indices = select_diverse_indices(
+            pre_candidates,
+            dtw_dists,
+            sim.top_k,
+            effective_min_gap,
+        )
+        top_distances = dtw_dists[np.isin(pre_candidates, top_indices)]
+    else:
+        top_indices = select_diverse_indices(
+            candidate_indices,
+            distances,
+            sim.top_k,
+            effective_min_gap,
+        )
+        top_distances = distances[np.isin(candidate_indices, top_indices)]
+
+    if len(top_indices) < min_required:
+        return None, "not_enough_diverse"
+
+    top_returns = terminal_returns[top_indices]
+    state_returns = terminal_returns[candidate_indices]
+    sim_terminal = quantile_dict(top_returns)
+    baseline = quantile_dict(state_returns)
+    baseline["count"] = int(len(state_returns))
+    actual_return = float(terminal_returns[query_end])
+
+    # Asymmetry Ratio: (Q75 - Q50) / (Q50 - Q25) with rigorous boundary handling
+    upside_span = sim_terminal["q75"] - sim_terminal["q50"]
+    downside_span = sim_terminal["q50"] - sim_terminal["q25"]
+
+    if upside_span <= 1e-8 and downside_span <= 1e-8:
+        asymmetry_ratio = 1.0
+    elif downside_span <= 1e-8:
+        asymmetry_ratio = 10.0 if upside_span > 0 else 1.0  # Dominant upside skew
+    elif upside_span <= 1e-8:
+        asymmetry_ratio = 0.1  # Dominant downside skew
+    else:
+        asymmetry_ratio = float(np.clip(upside_span / downside_span, 0.01, 100.0))
+
+    edge_thr = config.edge_threshold_bps / 10000.0
+    cost_frac = config.cost_bps / 10000.0
+
+    # Rule 1: Standard Conservative Quantile Rule
+    side_std = trade_side(sim_terminal["q25"], sim_terminal["q75"], threshold=edge_thr)
+    net_return_std = side_std * actual_return - (cost_frac if side_std != 0 else 0.0)
+
+    # Rule 2: Asymmetric Risk-Reward Filter Rule
+    side_asym = trade_side_asymmetric(
+        sim_terminal["q25"],
+        sim_terminal["q50"],
+        sim_terminal["q75"],
+        threshold=edge_thr,
+        cost_threshold=cost_frac,
+        asymmetry_ratio=asymmetry_ratio,
+    )
+    net_return_asym = side_asym * actual_return - (cost_frac if side_asym != 0 else 0.0)
+
+    confidence = "HIGH" if len(top_indices) >= sim.top_k else ("MEDIUM" if len(top_indices) >= sim.min_valid_samples else "LOW")
+
+    row = {
+        "query_end_index": query_end,
+        "query_end_time": working.loc[query_end, "timestamp"],
+        "state": query_state,
+        "matches": int(len(top_indices)),
+        "confidence": confidence,
+        "actual_return": actual_return,
+        "sim_q10": sim_terminal["q10"],
+        "sim_q25": sim_terminal["q25"],
+        "sim_median": sim_terminal["q50"],
+        "sim_q75": sim_terminal["q75"],
+        "sim_q90": sim_terminal["q90"],
+        "asymmetry_ratio": asymmetry_ratio,
+        "state_q25": baseline["q25"],
+        "state_median": baseline["q50"],
+        "state_q75": baseline["q75"],
+        "state_candidates": baseline["count"],
+        "sim_median_abs_error": abs(actual_return - sim_terminal["q50"]),
+        "state_median_abs_error": abs(actual_return - baseline["q50"]),
+        "covered_25_75": sim_terminal["q25"] <= actual_return <= sim_terminal["q75"],
+        "covered_10_90": sim_terminal["q10"] <= actual_return <= sim_terminal["q90"],
+        "direction_hit": same_sign(sim_terminal["q50"], actual_return),
+        "state_direction_hit": same_sign(baseline["q50"], actual_return),
+        "trade_side": side_std,
+        "strategy_return": net_return_std,
+        "trade_side_asym": side_asym,
+        "strategy_return_asym": net_return_asym,
+    }
+    return row, None
 
 
 def run_walk_forward(df: pd.DataFrame, config: BacktestConfig) -> BacktestResult:
@@ -51,7 +189,13 @@ def run_walk_forward(df: pd.DataFrame, config: BacktestConfig) -> BacktestResult
         raise ValueError("Not enough rows for walk-forward evaluation.")
 
     working = prepare_walk_forward_frame(df, sim, start_index)
-    features = make_feature_matrix(working, sim.window, sim.body_ratio_weight)
+    features = make_feature_matrix(
+        working,
+        sim.window,
+        sim.body_ratio_weight,
+        use_volume=sim.use_volume,
+        use_fvg=sim.use_fvg,
+    )
     terminal_returns = make_terminal_returns(working["close"].to_numpy(dtype=float), sim.horizon)
 
     rows: list[dict] = []
@@ -64,135 +208,65 @@ def run_walk_forward(df: pd.DataFrame, config: BacktestConfig) -> BacktestResult
     }
 
     min_required = sim.min_valid_samples if sim.min_valid_samples > 0 else sim.top_k
+    gap = effective_min_match_gap(sim)
+    n_channels = features.shape[1] // sim.window
 
-    for query_end in range(start_index, stop_index, stride):
-        if config.max_trials is not None and len(rows) >= config.max_trials:
-            break
+    query_ends = list(range(start_index, stop_index, stride))
+    if config.max_trials is not None:
+        query_ends = query_ends[: config.max_trials]
 
-        query_vector = features[query_end]
-        query_state = working.loc[query_end, "state"]
-        if not np.isfinite(query_vector).all() or "unknown" in str(query_state):
-            skip_reasons["invalid_state"] += 1
-            skipped += 1
-            continue
+    # Parallel or Sequential Execution
+    import os
+    from concurrent.futures import ThreadPoolExecutor
 
-        query_start = query_end - sim.window + 1
-        candidate_end_max = min(query_start - 1, query_end - sim.horizon)
-        if candidate_end_max < sim.window - 1:
-            skip_reasons["not_enough_history"] += 1
-            skipped += 1
-            continue
+    actual_workers = (
+        os.cpu_count() or 4 if config.n_jobs == -1 else max(1, config.n_jobs)
+    )
 
-        candidate_indices = np.arange(sim.window - 1, candidate_end_max + 1)
-        valid = (
-            np.isfinite(features[candidate_indices]).all(axis=1)
-            & np.isfinite(terminal_returns[candidate_indices])
-            & (working.loc[candidate_indices, "state"].to_numpy() == query_state)
-        )
-        candidate_indices = candidate_indices[valid]
-        if len(candidate_indices) < min_required:
-            skip_reasons["not_enough_candidates"] += 1
-            skipped += 1
-            continue
-
-        # Fast Euclidean Pre-filter
-        distances = np.linalg.norm(features[candidate_indices] - query_vector, axis=1)
-
-        # Apply DTW re-ranking if enabled
-        if sim.use_dtw:
-            pre_top_count = min(len(candidate_indices), sim.dtw_rerank_k)
-            pre_order = np.argsort(distances)[:pre_top_count]
-            pre_candidates = candidate_indices[pre_order]
-            query_matrix = query_vector.reshape(sim.window, 5)
-
-            dtw_dists = np.empty(pre_top_count, dtype=float)
-            for idx, cand_end in enumerate(pre_candidates):
-                cand_matrix = features[cand_end].reshape(sim.window, 5)
-                dtw_dists[idx] = dtw_distance_2d(query_matrix, cand_matrix, w=sim.dtw_warping_window)
-
-            top_indices = select_diverse_indices(
-                pre_candidates,
-                dtw_dists,
-                sim.top_k,
-                effective_min_match_gap(sim),
+    if actual_workers > 1 and len(query_ends) > 8:
+        with ThreadPoolExecutor(max_workers=actual_workers) as executor:
+            futures = [
+                executor.submit(
+                    _evaluate_single_trial,
+                    q_end,
+                    working,
+                    features,
+                    terminal_returns,
+                    sim,
+                    config,
+                    min_required,
+                    gap,
+                    n_channels,
+                )
+                for q_end in query_ends
+            ]
+            for f in futures:
+                row, reason = f.result()
+                if row is not None:
+                    rows.append(row)
+                else:
+                    skipped += 1
+                    if reason in skip_reasons:
+                        skip_reasons[reason] += 1
+    else:
+        for query_end in query_ends:
+            row, reason = _evaluate_single_trial(
+                query_end,
+                working,
+                features,
+                terminal_returns,
+                sim,
+                config,
+                min_required,
+                gap,
+                n_channels,
             )
-            top_distances = dtw_dists[np.isin(pre_candidates, top_indices)]
-        else:
-            top_indices = select_diverse_indices(
-                candidate_indices,
-                distances,
-                sim.top_k,
-                effective_min_match_gap(sim),
-            )
-            top_distances = distances[np.isin(candidate_indices, top_indices)]
-
-        if len(top_indices) < min_required:
-            skip_reasons["not_enough_diverse"] += 1
-            skipped += 1
-            continue
-
-        top_returns = terminal_returns[top_indices]
-        state_returns = terminal_returns[candidate_indices]
-        sim_terminal = quantile_dict(top_returns)
-        baseline = quantile_dict(state_returns)
-        baseline["count"] = int(len(state_returns))
-        actual_return = float(terminal_returns[query_end])
-
-        # Asymmetry Ratio: (Q75 - Q50) / (Q50 - Q25)
-        upside_span = sim_terminal["q75"] - sim_terminal["q50"]
-        downside_span = sim_terminal["q50"] - sim_terminal["q25"]
-        asymmetry_ratio = float(upside_span / (downside_span + 1e-8)) if downside_span > 0 else 1.0
-
-        edge_thr = config.edge_threshold_bps / 10000.0
-        cost_frac = config.cost_bps / 10000.0
-
-        # Rule 1: Standard Conservative Quantile Rule
-        side_std = trade_side(sim_terminal["q25"], sim_terminal["q75"], threshold=edge_thr)
-        net_return_std = side_std * actual_return - (cost_frac if side_std != 0 else 0.0)
-
-        # Rule 2: Asymmetric Risk-Reward Filter Rule
-        side_asym = trade_side_asymmetric(
-            sim_terminal["q25"],
-            sim_terminal["q50"],
-            sim_terminal["q75"],
-            threshold=edge_thr,
-            cost_threshold=cost_frac,
-            asymmetry_ratio=asymmetry_ratio,
-        )
-        net_return_asym = side_asym * actual_return - (cost_frac if side_asym != 0 else 0.0)
-
-        confidence = "HIGH" if len(top_indices) >= sim.top_k else ("MEDIUM" if len(top_indices) >= sim.min_valid_samples else "LOW")
-
-        rows.append(
-            {
-                "query_end_index": query_end,
-                "query_end_time": working.loc[query_end, "timestamp"],
-                "state": query_state,
-                "matches": int(len(top_indices)),
-                "confidence": confidence,
-                "actual_return": actual_return,
-                "sim_q10": sim_terminal["q10"],
-                "sim_q25": sim_terminal["q25"],
-                "sim_median": sim_terminal["q50"],
-                "sim_q75": sim_terminal["q75"],
-                "sim_q90": sim_terminal["q90"],
-                "asymmetry_ratio": asymmetry_ratio,
-                "state_q25": baseline["q25"],
-                "state_median": baseline["q50"],
-                "state_q75": baseline["q75"],
-                "state_candidates": baseline["count"],
-                "sim_median_abs_error": abs(actual_return - sim_terminal["q50"]),
-                "state_median_abs_error": abs(actual_return - baseline["q50"]),
-                "covered_25_75": sim_terminal["q25"] <= actual_return <= sim_terminal["q75"],
-                "covered_10_90": sim_terminal["q10"] <= actual_return <= sim_terminal["q90"],
-                "direction_hit": same_sign(sim_terminal["q50"], actual_return),
-                "state_direction_hit": same_sign(baseline["q50"], actual_return),
-                "trade_side": side_std,
-                "strategy_return": net_return_std,
-                "trade_side_asym": side_asym,
-                "strategy_return_asym": net_return_asym,
-            }
-        )
+            if row is not None:
+                rows.append(row)
+            else:
+                skipped += 1
+                if reason in skip_reasons:
+                    skip_reasons[reason] += 1
 
     trials = pd.DataFrame(rows)
     if trials.empty:
@@ -208,6 +282,7 @@ def run_walk_forward(df: pd.DataFrame, config: BacktestConfig) -> BacktestResult
         skipped=skipped,
         skip_reasons=skip_reasons,
     )
+
 
 
 def prepare_walk_forward_frame(
@@ -232,7 +307,11 @@ def prepare_walk_forward_frame(
 
 
 def make_feature_matrix(
-    df: pd.DataFrame, window: int, body_ratio_weight: float = 3.0
+    df: pd.DataFrame,
+    window: int,
+    body_ratio_weight: float = 3.0,
+    use_volume: bool = False,
+    use_fvg: bool = False,
 ) -> np.ndarray:
     open_ = df["open"].to_numpy(dtype=float)
     high = df["high"].to_numpy(dtype=float)
@@ -240,7 +319,15 @@ def make_feature_matrix(
     close = df["close"].to_numpy(dtype=float)
     atr = df["atr"].to_numpy(dtype=float)
     n = len(df)
-    features = np.full((n, window * 5), np.nan, dtype=float)
+
+    n_channels = 5
+    has_vol = use_volume and "volume" in df.columns
+    if has_vol:
+        n_channels += 4
+    if use_fvg:
+        n_channels += 2
+
+    features = np.full((n, window * n_channels), np.nan, dtype=float)
     if n < window:
         return features
 
@@ -263,13 +350,44 @@ def make_feature_matrix(
     rel_low = (low_w - ref[:, None]) / denom[:, None]
     rel_close = (close_w - ref[:, None]) / denom[:, None]
 
-    encoded = np.stack(
-        [rel_open, rel_high, rel_low, rel_close, body_ratio], axis=2
-    ).reshape(len(ends), -1)
+    channels = [rel_open, rel_high, rel_low, rel_close, body_ratio]
 
+    if has_vol:
+        from .vp_fvg import compute_volume_profile
+        vp_poc = np.empty((len(ends), window), dtype=float)
+        vp_vah = np.empty((len(ends), window), dtype=float)
+        vp_val = np.empty((len(ends), window), dtype=float)
+        vp_skew = np.empty((len(ends), window), dtype=float)
+        for i, end_i in enumerate(ends):
+            vp = compute_volume_profile(
+                df.iloc[end_i - window + 1 : end_i + 1],
+                atr[end_i],
+            )
+            vp_poc[i, :] = vp.poc_rel
+            vp_vah[i, :] = vp.vah_rel
+            vp_val[i, :] = vp.val_rel
+            vp_skew[i, :] = vp.vp_skew
+        channels.extend([vp_poc, vp_vah, vp_val, vp_skew])
+
+    if use_fvg:
+        from .vp_fvg import detect_unmitigated_fvg
+        fvg_bias = np.empty((len(ends), window), dtype=float)
+        fvg_dist = np.empty((len(ends), window), dtype=float)
+        for i, end_i in enumerate(ends):
+            fvg = detect_unmitigated_fvg(
+                df.iloc[end_i - window + 1 : end_i + 1],
+                atr[end_i],
+            )
+            fvg_bias[i, :] = fvg.net_fvg_bias
+            fvg_dist[i, :] = fvg.nearest_fvg_dist
+        channels.extend([fvg_bias, fvg_dist])
+
+
+    encoded = np.stack(channels, axis=2).reshape(len(ends), -1)
     valid = np.isfinite(denom) & (denom > 0) & np.isfinite(encoded).all(axis=1)
     features[ends[valid]] = encoded[valid]
     return features
+
 
 
 def make_terminal_returns(close: np.ndarray, horizon: int) -> np.ndarray:
