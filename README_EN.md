@@ -9,7 +9,7 @@
 [![Python Version](https://img.shields.io/badge/python-3.9%20%7C%203.10%20%7C%203.11%20%7C%203.12-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Acceleration](https://img.shields.io/badge/DTW%20JIT-330x%20Speedup-orange.svg)](https://numba.pydata.org/)
-[![Quant Rigour](https://img.shields.io/badge/Walk--Forward-Zero%20Lookahead-purple.svg)](#walk-forward-validation)
+[![Quant Rigour](https://img.shields.io/badge/Walk--Forward-Zero%20Lookahead-purple.svg)](#-walk-forward-validation)
 
 *Answer the definitive quantitative question without directional bias:*  
 **"When similar candlestick patterns appeared in history, what did the subsequent $N$-bar path distribution look like?"**
@@ -25,7 +25,7 @@
 - **🔍 Volume Profile & FVG Modalities**: Incorporates Point of Control (POC), Value Area (VAH/VAL), Volume Skewness, and Fair Value Gaps (3-bar unmitigated liquidity voids).
 - **🛡️ Dual Confidence Gating**: Rejects low-confidence noise with minimum sample thresholds ($K_{min}$) and distance outlier cutoffs.
 - **🎯 Softmax Distance-Weighted Quantiles**: Replaces uniform sampling with distance-weighted probabilistic ribbons ($Q_{10}, Q_{25}, Q_{50}, Q_{75}, Q_{90}$).
-- **🔬 Zero-Lookahead Walk-Forward Engine**: Strictly causal rolling evaluation reporting Spearman IC, Information Ratio ($\text{IC\_IR}$), $t$-statistics, and asymmetric risk-reward expectancy.
+- **🔬 Zero-Lookahead Walk-Forward Engine**: Strictly causal rolling evaluation reporting Spearman IC, Information Ratio ($\mathrm{IC_{IR}}$), $t$-statistics, and asymmetric risk-reward expectancy.
 
 ---
 
@@ -55,10 +55,16 @@ cd CandleWarp
 pip install -r requirements.txt
 ```
 
-### 2. Generate Deterministic Sample Data
+### 2. Built-in Test Datasets
 
+The `data/` directory includes pre-generated standard 1H benchmark datasets:
+- `data/xauusd_1h_demo.csv`: Gold (XAUUSD) 1H dataset with intraday session volume profiles and volatility shifts.
+- `data/btc_1h_demo.csv`: Bitcoin (BTCUSD) 1H dataset with strong momentum and Fair Value Gaps.
+- `data/eurusd_1h_demo.csv`: EURUSD 1H dataset with high mean-reversion characteristics.
+
+You can also synthesize custom datasets anytime:
 ```bash
-python3 -m a_shape_tool.cli --make-sample data/sample_ohlcv.csv --rows 2000
+python3 -m a_shape_tool.cli --make-sample data/xauusd_custom.csv --asset xauusd --rows 3000
 ```
 
 ### 3. Single-Window Pattern Distribution Query
@@ -67,7 +73,7 @@ Scan historical windows similar to the current market state and project future d
 
 ```bash
 python3 -m a_shape_tool.cli \
-  --csv data/sample_ohlcv.csv \
+  --csv data/xauusd_1h_demo.csv \
   --timeframe 1h \
   --window 100 \
   --horizon 50 \
@@ -92,7 +98,7 @@ Evaluate out-of-sample statistical power across historical regimes without looka
 
 ```bash
 python3 -m a_shape_tool.cli \
-  --csv data/sample_ohlcv.csv \
+  --csv data/xauusd_1h_demo.csv \
   --timeframe 1h \
   --window 100 \
   --horizon 50 \
@@ -108,10 +114,10 @@ python3 -m a_shape_tool.cli \
 
 ### Output Evaluation Metrics
 - **Median MAE Improvement**: Similarity prediction error vs. state-baseline error.
-- **Spearman IC & Information Ratio ($\text{IC\_IR}$)**:
-  $$\text{IC\_IR} = \frac{\text{Mean}(\text{IC})}{\text{Std}(\text{IC})}, \quad t\text{-stat} = \text{IC\_IR} \times \sqrt{N}$$
+- **Spearman IC & Information Ratio ($\mathrm{IC_{IR}}$)**:
+  $$\mathrm{IC_{IR}} = \frac{\mathrm{Mean}(\mathrm{IC})}{\mathrm{Std}(\mathrm{IC})}, \quad t\text{-stat} = \mathrm{IC_{IR}} \times \sqrt{N}$$
 - **Asymmetric Expectancy Ratio**:
-  $$\text{Asymmetry} = \frac{Q_{75} - Q_{50}}{Q_{50} - Q_{25}}$$
+  $$\mathrm{Asymmetry} = \frac{Q_{75} - Q_{50}}{Q_{50} - Q_{25}}$$
 
 ---
 
@@ -120,9 +126,9 @@ python3 -m a_shape_tool.cli \
 ### 1. Dimensionless Feature Representation
 For any OHLC window of length $W$ ending at bar $T$:
 
-$$\text{rel\_open}_t = \frac{\text{open}_t - \text{close}_0}{\text{ATR}_T}, \quad \text{rel\_close}_t = \frac{\text{close}_t - \text{close}_0}{\text{ATR}_T}$$
+$$\mathrm{rel\_open}_t = \frac{\mathrm{open}_t - \mathrm{close}_0}{\mathrm{ATR}_T}, \quad \mathrm{rel\_close}_t = \frac{\mathrm{close}_t - \mathrm{close}_0}{\mathrm{ATR}_T}$$
 
-$$\text{body\_ratio}_t = \frac{\text{close}_t - \text{open}_t}{\text{high}_t - \text{low}_t} \times w_{\text{body}}$$
+$$\mathrm{body\_ratio}_t = \frac{\mathrm{close}_t - \mathrm{open}_t}{\mathrm{high}_t - \mathrm{low}_t} \times w_{\mathrm{body}}$$
 
 ### 2. 2D Sakoe-Chiba DTW Distance
 Restricts warping path $p = (i, j)$ inside band $|i - j| \le w$:
@@ -132,7 +138,7 @@ $$D(i, j) = \| \mathbf{x}_i - \mathbf{y}_j \|_2 + \min \begin{cases} D(i-1, j) \
 ### 3. Softmax Distance-Weighted Quantiles
 Weights assigned to candidate path $k$ based on its DTW distance $d_k$:
 
-$$w_k = \frac{e^{-d_k / \tau}}{\sum_{m=1}^K e^{-d_m / \tau}}, \quad \tau = \text{median}(d)$$
+$$w_k = \frac{e^{-d_k / \tau}}{\sum_{m=1}^K e^{-d_m / \tau}}, \quad \tau = \mathrm{median}(d)$$
 
 ---
 
@@ -151,6 +157,10 @@ CandleWarp/
 │   ├── plotting.py        # Distribution ribbons & candlestick grid rendering
 │   ├── risk.py            # Risk management & trade execution logic
 │   └── sample_data.py     # Realistic synthetic OHLCV generator
+├── data/
+│   ├── xauusd_1h_demo.csv # Gold 1H official demo dataset
+│   ├── btc_1h_demo.csv    # Bitcoin 1H official demo dataset
+│   └── eurusd_1h_demo.csv # EURUSD 1H official demo dataset
 ├── requirements.txt       # Core dependencies
 ├── LICENSE                # MIT License
 ├── README.md              # Chinese Documentation (Default)

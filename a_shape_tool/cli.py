@@ -14,7 +14,14 @@ def main() -> None:
     )
     parser.add_argument("--csv", help="Input OHLC CSV path.")
     parser.add_argument("--make-sample", help="Write deterministic sample OHLC CSV to this path.")
-    parser.add_argument("--rows", type=int, default=900, help="Rows for --make-sample.")
+    parser.add_argument(
+        "--asset",
+        choices=["xauusd", "btc", "eurusd", "generic"],
+        default="xauusd",
+        help="Asset preset for synthetic sample generation (xauusd, btc, eurusd, generic). Default: xauusd.",
+    )
+    parser.add_argument("--rows", type=int, default=2000, help="Rows for --make-sample. Default: 2000.")
+
     parser.add_argument(
         "--timeframe",
         default="1h",
@@ -173,10 +180,11 @@ def main() -> None:
 
 
     if args.make_sample:
-        sample_path = make_sample_ohlc(args.make_sample, rows=args.rows)
-        print(f"Wrote sample OHLC CSV: {sample_path}")
+        sample_path = make_sample_ohlc(args.make_sample, rows=args.rows, asset=args.asset)
+        print(f"Wrote sample OHLC CSV ({args.asset}): {sample_path}")
         if not args.csv:
             return
+
 
     if not args.csv:
         parser.error("--csv is required unless only --make-sample is used.")

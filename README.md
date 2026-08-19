@@ -25,7 +25,7 @@
 - **🔍 Volume Profile (筹码分布) 与 FVG 因子增强**：不仅看“形”，更看“量”与“微观结构”，提取筹码峰 (POC)、70% 价值区 (VAH/VAL)、成交量偏度以及三根 K 线未回补流动性失衡区 (Fair Value Gap)。
 - **🛡️ 双重置信度闸门机制**：拒绝低置信度噪点匹配，设定最小有效样本阈值 ($K_{min}$) 与最大距离截断，杜绝弱相关样本强行凑数。
 - **🎯 Softmax 距离加权概率分位数**：用加权概率分布取代机械等权平均，生成更逼近真实物理路径的概率分位带（$Q_{10}, Q_{25}, Q_{50}, Q_{75}, Q_{90}$）。
-- **🔬 严谨无未来函数 Walk-Forward 验证**：严格时间因果隔离的滚动回测体系，全面评估 Spearman IC 秩相关系数、信息比率 ($\text{IC\_IR}$)、$t$ 显著性统计量以及不对称期望收益。
+- **🔬 严谨无未来函数 Walk-Forward 验证**：严格时间因果隔离的滚动回测体系，全面评估 Spearman IC 秩相关系数、信息比率 ($\mathrm{IC_{IR}}$)、$t$ 显著性统计量以及不对称期望收益。
 
 ---
 
@@ -55,10 +55,16 @@ cd CandleWarp
 pip install -r requirements.txt
 ```
 
-### 2. 生成确定性测试行情数据
+### 2. 内置测试数据源
 
+仓库 `data/` 目录下已预置 3 类资产的 1H 标准测试数据：
+- `data/xauusd_1h_demo.csv`：黄金 1H 模拟数据（包含高波动、肥尾冲击与量价突增特征）
+- `data/btc_1h_demo.csv`：比特币 1H 模拟数据（包含强动量趋势与跳空失衡特征）
+- `data/eurusd_1h_demo.csv`：欧美外汇 1H 模拟数据（包含均值回归与盘整特征）
+
+也可以随时生成任意指定资产的测试集：
 ```bash
-python3 -m a_shape_tool.cli --make-sample data/sample_ohlcv.csv --rows 2000
+python3 -m a_shape_tool.cli --make-sample data/xauusd_custom.csv --asset xauusd --rows 3000
 ```
 
 ### 3. 单窗口形态相似度与分布检索
@@ -67,7 +73,7 @@ python3 -m a_shape_tool.cli --make-sample data/sample_ohlcv.csv --rows 2000
 
 ```bash
 python3 -m a_shape_tool.cli \
-  --csv data/sample_ohlcv.csv \
+  --csv data/xauusd_1h_demo.csv \
   --timeframe 1h \
   --window 100 \
   --horizon 50 \
@@ -92,7 +98,7 @@ python3 -m a_shape_tool.cli \
 
 ```bash
 python3 -m a_shape_tool.cli \
-  --csv data/sample_ohlcv.csv \
+  --csv data/xauusd_1h_demo.csv \
   --timeframe 1h \
   --window 100 \
   --horizon 50 \
@@ -108,10 +114,10 @@ python3 -m a_shape_tool.cli \
 
 ### 核心评估指标
 - **中位数误差改善度 (MAE Improvement)**：形态中位数预测误差相比于“同市场状态、不看形态”基准的降低幅度。
-- **Spearman 秩相关系数与信息比率 ($\text{IC\_IR}$)**：
-  $$\text{IC\_IR} = \frac{\text{Mean}(\text{IC})}{\text{Std}(\text{IC})}, \quad t\text{-statistic} = \text{IC\_IR} \times \sqrt{N}$$
+- **Spearman 秩相关系数与信息比率 ($\mathrm{IC_{IR}}$)**：
+  $$\mathrm{IC_{IR}} = \frac{\mathrm{Mean}(\mathrm{IC})}{\mathrm{Std}(\mathrm{IC})}, \quad t\text{-stat} = \mathrm{IC_{IR}} \times \sqrt{N}$$
 - **不对称期望比率 (Asymmetric Expectancy Ratio)**：
-  $$\text{Asymmetry} = \frac{Q_{75} - Q_{50}}{Q_{50} - Q_{25}}$$
+  $$\mathrm{Asymmetry} = \frac{Q_{75} - Q_{50}}{Q_{50} - Q_{25}}$$
   仅在上行爆发空间显著大于下行潜在亏损时发出信号。
 
 ---
@@ -121,9 +127,9 @@ python3 -m a_shape_tool.cli \
 ### 1. 无量纲相对空间编码
 对于任意在第 $T$ 根 K 线结束、长度为 $W$ 的窗口：
 
-$$\text{rel\_open}_t = \frac{\text{open}_t - \text{close}_0}{\text{ATR}_T}, \quad \text{rel\_close}_t = \frac{\text{close}_t - \text{close}_0}{\text{ATR}_T}$$
+$$\mathrm{rel\_open}_t = \frac{\mathrm{open}_t - \mathrm{close}_0}{\mathrm{ATR}_T}, \quad \mathrm{rel\_close}_t = \frac{\mathrm{close}_t - \mathrm{close}_0}{\mathrm{ATR}_T}$$
 
-$$\text{body\_ratio}_t = \frac{\text{close}_t - \text{open}_t}{\text{high}_t - \text{low}_t} \times w_{\text{body}}$$
+$$\mathrm{body\_ratio}_t = \frac{\mathrm{close}_t - \mathrm{open}_t}{\mathrm{high}_t - \mathrm{low}_t} \times w_{\mathrm{body}}$$
 
 ### 2. 带有 Sakoe-Chiba 带约束的 2D-DTW 距离
 限制规整路径 $p = (i, j)$ 在时间漂移窗口 $|i - j| \le w$ 内：
@@ -133,7 +139,7 @@ $$D(i, j) = \| \mathbf{x}_i - \mathbf{y}_j \|_2 + \min \begin{cases} D(i-1, j) \
 ### 3. Softmax 距离加权概率分位数
 根据各候选历史路径与当前形态的 DTW 距离 $d_k$ 赋予 Softmax 概率衰减权重：
 
-$$w_k = \frac{e^{-d_k / \tau}}{\sum_{m=1}^K e^{-d_m / \tau}}, \quad \tau = \text{median}(d)$$
+$$w_k = \frac{e^{-d_k / \tau}}{\sum_{m=1}^K e^{-d_m / \tau}}, \quad \tau = \mathrm{median}(d)$$
 
 ---
 
@@ -151,7 +157,11 @@ CandleWarp/
 │   ├── pivot.py           # ZigZag 极值拐点检测算法
 │   ├── plotting.py        # 走势分布分位带与多子图 K 线网格绘制
 │   ├── risk.py            # 动态风控与期望收益规则计算
-│   └── sample_data.py     # 真实特征合成 OHLCV 生成器
+│   └── sample_data.py     # 真实特征多品种 OHLCV 数据生成器
+├── data/
+│   ├── xauusd_1h_demo.csv # 黄金 1H 官方测试数据集
+│   ├── btc_1h_demo.csv    # 比特币 1H 官方测试数据集
+│   └── eurusd_1h_demo.csv # 欧美外汇 1H 官方测试数据集
 ├── requirements.txt       # 项目核心依赖库
 ├── LICENSE                # MIT 开源协议
 ├── README.md              # 中文项目文档 (默认)

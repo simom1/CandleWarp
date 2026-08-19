@@ -5,10 +5,12 @@ __pycache__/
 .DS_Store
 .matplotlib-cache/
 data/*.csv
+!data/*_demo.csv
 output*/
 *.egg-info/
 .pytest_cache/
 .coverage
 .venv/
 venv/
+
 
