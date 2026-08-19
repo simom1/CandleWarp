@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from typing import Callable
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 
 from numpy.lib.stride_tricks import sliding_window_view
 
@@ -15,6 +17,7 @@ from .core import (
     compute_volatility_cuts,
     effective_min_match_gap,
 )
+from .dtw import dtw_distance_2d
 
 
 @dataclass(frozen=True)
@@ -60,6 +63,8 @@ def run_walk_forward(df: pd.DataFrame, config: BacktestConfig) -> BacktestResult
         "not_enough_diverse": 0,
     }
 
+    min_required = sim.min_valid_samples if sim.min_valid_samples > 0 else sim.top_k
+
     for query_end in range(start_index, stop_index, stride):
         if config.max_trials is not None and len(rows) >= config.max_trials:
             break
@@ -85,19 +90,43 @@ def run_walk_forward(df: pd.DataFrame, config: BacktestConfig) -> BacktestResult
             & (working.loc[candidate_indices, "state"].to_numpy() == query_state)
         )
         candidate_indices = candidate_indices[valid]
-        if len(candidate_indices) < sim.top_k:
+        if len(candidate_indices) < min_required:
             skip_reasons["not_enough_candidates"] += 1
             skipped += 1
             continue
 
+        # Fast Euclidean Pre-filter
         distances = np.linalg.norm(features[candidate_indices] - query_vector, axis=1)
-        top_indices = select_diverse_indices(
-            candidate_indices,
-            distances,
-            sim.top_k,
-            effective_min_match_gap(sim),
-        )
-        if len(top_indices) < sim.top_k:
+
+        # Apply DTW re-ranking if enabled
+        if sim.use_dtw:
+            pre_top_count = min(len(candidate_indices), sim.dtw_rerank_k)
+            pre_order = np.argsort(distances)[:pre_top_count]
+            pre_candidates = candidate_indices[pre_order]
+            query_matrix = query_vector.reshape(sim.window, 5)
+
+            dtw_dists = np.empty(pre_top_count, dtype=float)
+            for idx, cand_end in enumerate(pre_candidates):
+                cand_matrix = features[cand_end].reshape(sim.window, 5)
+                dtw_dists[idx] = dtw_distance_2d(query_matrix, cand_matrix, w=sim.dtw_warping_window)
+
+            top_indices = select_diverse_indices(
+                pre_candidates,
+                dtw_dists,
+                sim.top_k,
+                effective_min_match_gap(sim),
+            )
+            top_distances = dtw_dists[np.isin(pre_candidates, top_indices)]
+        else:
+            top_indices = select_diverse_indices(
+                candidate_indices,
+                distances,
+                sim.top_k,
+                effective_min_match_gap(sim),
+            )
+            top_distances = distances[np.isin(candidate_indices, top_indices)]
+
+        if len(top_indices) < min_required:
             skip_reasons["not_enough_diverse"] += 1
             skipped += 1
             continue
@@ -108,14 +137,31 @@ def run_walk_forward(df: pd.DataFrame, config: BacktestConfig) -> BacktestResult
         baseline = quantile_dict(state_returns)
         baseline["count"] = int(len(state_returns))
         actual_return = float(terminal_returns[query_end])
-        side = trade_side(
+
+        # Asymmetry Ratio: (Q75 - Q50) / (Q50 - Q25)
+        upside_span = sim_terminal["q75"] - sim_terminal["q50"]
+        downside_span = sim_terminal["q50"] - sim_terminal["q25"]
+        asymmetry_ratio = float(upside_span / (downside_span + 1e-8)) if downside_span > 0 else 1.0
+
+        edge_thr = config.edge_threshold_bps / 10000.0
+        cost_frac = config.cost_bps / 10000.0
+
+        # Rule 1: Standard Conservative Quantile Rule
+        side_std = trade_side(sim_terminal["q25"], sim_terminal["q75"], threshold=edge_thr)
+        net_return_std = side_std * actual_return - (cost_frac if side_std != 0 else 0.0)
+
+        # Rule 2: Asymmetric Risk-Reward Filter Rule
+        side_asym = trade_side_asymmetric(
             sim_terminal["q25"],
+            sim_terminal["q50"],
             sim_terminal["q75"],
-            threshold=config.edge_threshold_bps / 10000.0,
+            threshold=edge_thr,
+            cost_threshold=cost_frac,
+            asymmetry_ratio=asymmetry_ratio,
         )
-        net_return = side * actual_return
-        if side != 0:
-            net_return -= config.cost_bps / 10000.0
+        net_return_asym = side_asym * actual_return - (cost_frac if side_asym != 0 else 0.0)
+
+        confidence = "HIGH" if len(top_indices) >= sim.top_k else ("MEDIUM" if len(top_indices) >= sim.min_valid_samples else "LOW")
 
         rows.append(
             {
@@ -123,12 +169,14 @@ def run_walk_forward(df: pd.DataFrame, config: BacktestConfig) -> BacktestResult
                 "query_end_time": working.loc[query_end, "timestamp"],
                 "state": query_state,
                 "matches": int(len(top_indices)),
+                "confidence": confidence,
                 "actual_return": actual_return,
                 "sim_q10": sim_terminal["q10"],
                 "sim_q25": sim_terminal["q25"],
                 "sim_median": sim_terminal["q50"],
                 "sim_q75": sim_terminal["q75"],
                 "sim_q90": sim_terminal["q90"],
+                "asymmetry_ratio": asymmetry_ratio,
                 "state_q25": baseline["q25"],
                 "state_median": baseline["q50"],
                 "state_q75": baseline["q75"],
@@ -139,8 +187,10 @@ def run_walk_forward(df: pd.DataFrame, config: BacktestConfig) -> BacktestResult
                 "covered_10_90": sim_terminal["q10"] <= actual_return <= sim_terminal["q90"],
                 "direction_hit": same_sign(sim_terminal["q50"], actual_return),
                 "state_direction_hit": same_sign(baseline["q50"], actual_return),
-                "trade_side": side,
-                "strategy_return": net_return,
+                "trade_side": side_std,
+                "strategy_return": net_return_std,
+                "trade_side_asym": side_asym,
+                "strategy_return_asym": net_return_asym,
             }
         )
 
@@ -174,8 +224,6 @@ def prepare_walk_forward_frame(
     )
 
     atr_pct = (working["atr"] / working["close"]).replace([np.inf, -np.inf], np.nan)
-    # Fix: freeze volatility thresholds at the first query point to avoid lookahead leakage.
-    # Using full-sample quantiles would let future vol regimes influence historical bin labels.
     cuts = compute_volatility_cuts(atr_pct.iloc[: first_query_index + 1])
     working["vol_bin"] = apply_volatility_cuts(atr_pct, cuts)
 
@@ -186,12 +234,6 @@ def prepare_walk_forward_frame(
 def make_feature_matrix(
     df: pd.DataFrame, window: int, body_ratio_weight: float = 3.0
 ) -> np.ndarray:
-    """Build a (n_rows, window*5) feature matrix via vectorised sliding windows.
-
-    Each row corresponds to the window ending at that bar index.  Rows without a
-    complete valid window are left as NaN.  Uses numpy sliding_window_view for a
-    zero-copy strided view, replacing the previous O(n) Python loop.
-    """
     open_ = df["open"].to_numpy(dtype=float)
     high = df["high"].to_numpy(dtype=float)
     low = df["low"].to_numpy(dtype=float)
@@ -202,15 +244,14 @@ def make_feature_matrix(
     if n < window:
         return features
 
-    # sliding_window_view: shape (n - window + 1, window) – zero-copy strided view
     open_w = sliding_window_view(open_, window)
     high_w = sliding_window_view(high, window)
     low_w = sliding_window_view(low, window)
     close_w = sliding_window_view(close, window)
 
-    ends = np.arange(window - 1, n)   # end bar index for each window
-    denom = atr[ends]                  # ATR at last bar of each window
-    ref = close_w[:, 0]               # reference close = first bar of each window
+    ends = np.arange(window - 1, n)
+    denom = atr[ends]
+    ref = close_w[:, 0]
 
     candle_range = high_w - low_w
     body_ratio = (
@@ -222,7 +263,6 @@ def make_feature_matrix(
     rel_low = (low_w - ref[:, None]) / denom[:, None]
     rel_close = (close_w - ref[:, None]) / denom[:, None]
 
-    # Stack → (n_windows, window, 5) → flatten to (n_windows, window*5)
     encoded = np.stack(
         [rel_open, rel_high, rel_low, rel_close, body_ratio], axis=2
     ).reshape(len(ends), -1)
@@ -260,8 +300,6 @@ def select_diverse_indices(
     if min_gap <= 0:
         return sorted_candidates[:top_k]
 
-    # Pre-allocate result buffer; iterate sorted candidates once.
-    # Inner check is O(n_selected) ≤ O(top_k) which is small, so overall O(n).
     buffer = np.empty(top_k, dtype=int)
     n_sel = 0
     for candidate in sorted_candidates:
@@ -289,6 +327,27 @@ def trade_side(q25: float, q75: float, threshold: float) -> int:
     if q25 > threshold:
         return 1
     if q75 < -threshold:
+        return -1
+    return 0
+
+
+def trade_side_asymmetric(
+    q25: float,
+    q50: float,
+    q75: float,
+    threshold: float,
+    cost_threshold: float,
+    asymmetry_ratio: float,
+    min_asym_long: float = 1.25,
+    max_asym_short: float = 0.80,
+) -> int:
+    """Asymmetric Risk-Reward trade filter:
+    - Long: Q25 covers execution cost, median positive, and upside elasticity exceeds downside (ratio >= 1.25).
+    - Short: Q75 covers execution cost, median negative, and downside risk exceeds upside (ratio <= 0.80).
+    """
+    if q50 > threshold and q25 > -cost_threshold and asymmetry_ratio >= min_asym_long:
+        return 1
+    if q50 < -threshold and q75 < cost_threshold and asymmetry_ratio <= max_asym_short:
         return -1
     return 0
 
@@ -327,11 +386,52 @@ def summarize_trials(trials: pd.DataFrame, config: BacktestConfig, skipped: int)
     state_mae = float(trials["state_median_abs_error"].mean())
     improvement = state_mae - sim_mae
     improvement_pct = improvement / state_mae if state_mae > 0 else np.nan
-    spearman_ic = trials[["sim_median", "actual_return"]].corr(method="spearman").iloc[0, 1]
 
-    trade_rows = trials[trials["trade_side"] != 0].copy()
-    trade_summary = summarize_trades(trade_rows)
-    trade_summary["trade_rate"] = float(len(trade_rows) / len(trials))
+    # Spearman IC & IC_IR Statistics
+    preds = trials["sim_median"].to_numpy(dtype=float)
+    actuals = trials["actual_return"].to_numpy(dtype=float)
+    spearman_res = stats.spearmanr(preds, actuals)
+    spearman_ic = float(spearman_res.statistic) if pd.notna(spearman_res.statistic) else np.nan
+    spearman_p = float(spearman_res.pvalue) if pd.notna(spearman_res.pvalue) else np.nan
+
+    # Rolling IC for stability & IC_IR
+    n_trials = len(trials)
+    if n_trials >= 10:
+        rolling_win = min(15, n_trials // 2)
+        rolling_ics = []
+        for i in range(rolling_win, n_trials + 1):
+            sub_pred = preds[i - rolling_win : i]
+            sub_act = actuals[i - rolling_win : i]
+            if len(np.unique(sub_pred)) > 1 and len(np.unique(sub_act)) > 1:
+                r_ic = stats.spearmanr(sub_pred, sub_act).statistic
+                if pd.notna(r_ic):
+                    rolling_ics.append(r_ic)
+        if rolling_ics:
+            ic_mean = float(np.mean(rolling_ics))
+            ic_std = float(np.std(rolling_ics, ddof=1)) if len(rolling_ics) > 1 else 0.0
+            ic_ir = float(ic_mean / (ic_std + 1e-8))
+            ic_t_stat = float(ic_ir * np.sqrt(len(rolling_ics)))
+        else:
+            ic_mean, ic_std, ic_ir, ic_t_stat = spearman_ic, 0.0, np.nan, np.nan
+    else:
+        ic_mean, ic_std, ic_ir, ic_t_stat = spearman_ic, 0.0, np.nan, np.nan
+
+    # Trade summaries for standard rule and asymmetric rule
+    trade_rows_std = trials[trials["trade_side"] != 0].copy()
+    trade_summary_std = summarize_trades(trade_rows_std, "strategy_return")
+    trade_summary_std["trade_rate"] = float(len(trade_rows_std) / len(trials))
+
+    trade_rows_asym = trials[trials["trade_side_asym"] != 0].copy()
+    trade_summary_asym = summarize_trades(trade_rows_asym, "strategy_return_asym")
+    trade_summary_asym["trade_rate_asym"] = float(len(trade_rows_asym) / len(trials))
+
+    # High/Medium confidence subset metrics
+    high_conf = trials[trials["confidence"].isin(["HIGH", "MEDIUM"])]
+    high_conf_ic = (
+        float(stats.spearmanr(high_conf["sim_median"], high_conf["actual_return"]).statistic)
+        if len(high_conf) >= 5 and len(np.unique(high_conf["sim_median"])) > 1
+        else np.nan
+    )
 
     return {
         "timeframe": config.similarity.timeframe,
@@ -352,12 +452,26 @@ def summarize_trials(trials: pd.DataFrame, config: BacktestConfig, skipped: int)
         "median_mae_state_baseline": state_mae,
         "median_mae_improvement": float(improvement),
         "median_mae_improvement_pct": float(improvement_pct),
-        "spearman_ic": float(spearman_ic) if pd.notna(spearman_ic) else np.nan,
-        **trade_summary,
+        # IC & IC_IR Robustness Metrics
+        "spearman_ic": spearman_ic,
+        "spearman_p_value": spearman_p,
+        "ic_ir": ic_ir,
+        "ic_t_stat": ic_t_stat,
+        "valid_confidence_ic": high_conf_ic,
+        "valid_confidence_ratio": float(len(high_conf) / len(trials)),
+
+        # Trading Performance
+        **trade_summary_std,
+        # Asymmetric Rule Performance
+        "asym_trades": trade_summary_asym["trades"],
+        "asym_win_rate": trade_summary_asym["trade_win_rate"],
+        "asym_profit_factor": trade_summary_asym["profit_factor"],
+        "asym_max_drawdown": trade_summary_asym["max_drawdown"],
+        "asym_compounded_return": trade_summary_asym["compounded_return"],
     }
 
 
-def summarize_trades(trades: pd.DataFrame) -> dict:
+def summarize_trades(trades: pd.DataFrame, return_col: str = "strategy_return") -> dict:
     if trades.empty:
         return {
             "trades": 0,
@@ -370,7 +484,7 @@ def summarize_trades(trades: pd.DataFrame) -> dict:
             "compounded_return": 0.0,
         }
 
-    returns = trades["strategy_return"].astype(float)
+    returns = trades[return_col].astype(float)
     gains = returns[returns > 0].sum()
     losses = -returns[returns < 0].sum()
     equity = (1.0 + returns).cumprod()

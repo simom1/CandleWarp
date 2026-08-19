@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from .dtw import dtw_distance_2d
+from .vp_fvg import compute_volume_profile, detect_unmitigated_fvg
 
 
 OHLC_COLUMNS = ("open", "high", "low", "close")
@@ -27,6 +28,8 @@ __all__ = [
     "add_state_columns",
     "effective_min_match_gap",
     "resolve_query_end",
+    "make_quantiles",
+    "make_weighted_quantiles",
 ]
 
 
@@ -44,12 +47,20 @@ class SimilarityConfig:
     query_end: str = "last"
     history_only: bool = True
     # Scales body_ratio ∈ [-1,1] to be comparable with ATR-normalised features
-    # which typically span ±5–20 per window; 3.0 is a reasonable starting point
     body_ratio_weight: float = 3.0
     # DTW extensions
     use_dtw: bool = True
     dtw_warping_window: int = 10
     dtw_rerank_k: int = 200
+    # Risk Mitigation 1: Sample Size & Distance Gating
+    min_valid_samples: int = 15
+    max_distance_cutoff: float | None = None
+    use_distance_weighting: bool = True
+    # Microstructure extensions: Volume Profile & FVG
+    use_volume: bool = False
+    volume_weight: float = 1.0
+    use_fvg: bool = False
+    fvg_weight: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -58,6 +69,7 @@ class SimilarityResult:
     matches: pd.DataFrame
     paths: pd.DataFrame
     quantiles: pd.DataFrame
+    weighted_quantiles: pd.DataFrame | None = None
 
 
 def load_ohlc_csv(csv_path: str | Path) -> pd.DataFrame:
@@ -82,11 +94,20 @@ def load_ohlc_csv(csv_path: str | Path) -> pd.DataFrame:
     for column in OHLC_COLUMNS:
         df[column] = pd.to_numeric(df[column], errors="coerce")
 
+    if "volume" in df.columns:
+        df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0.0)
+        out_cols = ["timestamp", *OHLC_COLUMNS, "volume"]
+    elif "vol" in df.columns:
+        df["volume"] = pd.to_numeric(df["vol"], errors="coerce").fillna(0.0)
+        out_cols = ["timestamp", *OHLC_COLUMNS, "volume"]
+    else:
+        out_cols = ["timestamp", *OHLC_COLUMNS]
+
     df = df.dropna(subset=[*OHLC_COLUMNS]).reset_index(drop=True)
     if len(df) < 10:
         raise ValueError("CSV has too few valid OHLC rows.")
 
-    return df[["timestamp", *OHLC_COLUMNS]]
+    return df[out_cols]
 
 
 def run_similarity(df: pd.DataFrame, config: SimilarityConfig) -> SimilarityResult:
@@ -110,7 +131,18 @@ def run_similarity(df: pd.DataFrame, config: SimilarityConfig) -> SimilarityResu
             "Use more data or reduce --atr-period / --trend-lookback."
         )
 
-    query_vector = encode_window(working, query_start, query_end, config.body_ratio_weight)
+    query_vector = encode_window(
+        working,
+        query_start,
+        query_end,
+        body_ratio_weight=config.body_ratio_weight,
+        use_volume=config.use_volume,
+        volume_weight=config.volume_weight,
+        use_fvg=config.use_fvg,
+        fvg_weight=config.fvg_weight,
+    )
+    feature_dim = 5 + (1 if config.use_volume else 0) + (2 if config.use_fvg else 0)
+
     candidates = iter_candidate_windows(working, query_start, query_end, config)
 
     rows: list[dict] = []
@@ -120,11 +152,23 @@ def run_similarity(df: pd.DataFrame, config: SimilarityConfig) -> SimilarityResu
             continue
 
         try:
-            vector = encode_window(working, start, end, config.body_ratio_weight)
+            vector = encode_window(
+                working,
+                start,
+                end,
+                body_ratio_weight=config.body_ratio_weight,
+                use_volume=config.use_volume,
+                volume_weight=config.volume_weight,
+                use_fvg=config.use_fvg,
+                fvg_weight=config.fvg_weight,
+            )
         except ValueError:
             continue
 
         distance = float(np.linalg.norm(query_vector - vector))
+        if config.max_distance_cutoff is not None and distance > config.max_distance_cutoff:
+            continue
+
         future = forward_return_path(working, end, config.horizon)
         path_index = len(path_rows)
         rows.append(
@@ -152,23 +196,32 @@ def run_similarity(df: pd.DataFrame, config: SimilarityConfig) -> SimilarityResu
     # Hierarchical Search: If use_dtw is enabled, pre-filter with Euclidean and re-rank with 2D-DTW
     if config.use_dtw:
         ranked_euclidean = pd.DataFrame(rows).sort_values("distance").reset_index(drop=True)
-        # Select the top dtw_rerank_k candidates for expensive DTW evaluation
+        # Select the top dtw_rerank_k candidates for DTW evaluation
         dtw_candidates = ranked_euclidean.head(config.dtw_rerank_k).copy()
-        
-        query_matrix = query_vector.reshape(-1, 5)
+
+        query_matrix = query_vector.reshape(-1, feature_dim)
         dtw_rows = []
         for _, row in dtw_candidates.iterrows():
             start, end = int(row["start_index"]), int(row["end_index"])
             try:
-                candidate_vector = encode_window(working, start, end, config.body_ratio_weight)
-                candidate_matrix = candidate_vector.reshape(-1, 5)
+                candidate_vector = encode_window(
+                    working,
+                    start,
+                    end,
+                    body_ratio_weight=config.body_ratio_weight,
+                    use_volume=config.use_volume,
+                    volume_weight=config.volume_weight,
+                    use_fvg=config.use_fvg,
+                    fvg_weight=config.fvg_weight,
+                )
+                candidate_matrix = candidate_vector.reshape(-1, feature_dim)
                 dtw_dist = dtw_distance_2d(query_matrix, candidate_matrix, w=config.dtw_warping_window)
                 row_dict = row.to_dict()
-                row_dict["distance"] = dtw_dist  # Replace Euclidean distance with DTW distance
+                row_dict["distance"] = dtw_dist
                 dtw_rows.append(row_dict)
             except ValueError:
                 continue
-                
+
         ranked = pd.DataFrame(dtw_rows).sort_values("distance").reset_index(drop=True)
     else:
         ranked = pd.DataFrame(rows).sort_values("distance").reset_index(drop=True)
@@ -180,12 +233,27 @@ def run_similarity(df: pd.DataFrame, config: SimilarityConfig) -> SimilarityResu
     matches.insert(0, "rank", np.arange(1, len(matches) + 1))
 
     selected_paths = np.vstack([path_rows[int(i)] for i in selected["path_index"]])
+    selected_distances = matches["distance"].to_numpy(dtype=float)
 
     path_columns = [f"t+{step}" for step in range(config.horizon + 1)]
     paths = pd.DataFrame(selected_paths, columns=path_columns)
     paths.insert(0, "rank", np.arange(1, len(paths) + 1))
 
     quantiles = make_quantiles(selected_paths)
+    weighted_quantiles = (
+        make_weighted_quantiles(selected_paths, selected_distances)
+        if config.use_distance_weighting
+        else None
+    )
+
+    found_count = len(matches)
+    if found_count >= config.top_k:
+        confidence = "HIGH"
+    elif found_count >= config.min_valid_samples:
+        confidence = "MEDIUM"
+    else:
+        confidence = "LOW"
+
     query = {
         "query_start_index": query_start,
         "query_end_index": query_end,
@@ -199,10 +267,20 @@ def run_similarity(df: pd.DataFrame, config: SimilarityConfig) -> SimilarityResu
         "timeframe": config.timeframe,
         "atr_period": config.atr_period,
         "top_k_requested": config.top_k,
-        "top_k_found": len(matches),
+        "top_k_found": found_count,
+        "confidence_level": confidence,
+        "min_valid_samples": config.min_valid_samples,
         "min_match_gap": effective_min_match_gap(config),
+        "mean_match_distance": float(np.mean(selected_distances)),
+        "min_match_distance": float(np.min(selected_distances)),
     }
-    return SimilarityResult(query=query, matches=matches, paths=paths, quantiles=quantiles)
+    return SimilarityResult(
+        query=query,
+        matches=matches,
+        paths=paths,
+        quantiles=quantiles,
+        weighted_quantiles=weighted_quantiles,
+    )
 
 
 def compute_atr(df: pd.DataFrame, period: int) -> pd.Series:
@@ -250,11 +328,7 @@ def compute_trend_bin(close: pd.Series, lookback: int, flat_threshold: float) ->
 
 
 def compute_volatility_cuts(atr_pct: pd.Series) -> tuple[float, float] | None:
-    """Return (low_cut, high_cut) 33/66-percentile thresholds, or None if too few values.
-
-    Separating cut computation from classification allows walk-forward code to
-    freeze the thresholds at the first query point and avoid lookahead leakage.
-    """
+    """Return (low_cut, high_cut) 33/66-percentile thresholds, or None if too few values."""
     valid = atr_pct.replace([np.inf, -np.inf], np.nan).dropna()
     if len(valid) < 3:
         return None
@@ -282,13 +356,24 @@ def compute_volatility_bin(atr_pct: pd.Series) -> pd.Series:
 
 
 def encode_window(
-    df: pd.DataFrame, start: int, end: int, body_ratio_weight: float = 3.0
+    df: pd.DataFrame,
+    start: int,
+    end: int,
+    body_ratio_weight: float = 3.0,
+    use_volume: bool = False,
+    volume_weight: float = 1.0,
+    use_fvg: bool = False,
+    fvg_weight: float = 1.0,
 ) -> np.ndarray:
-    """Encode one OHLC window into a flat feature vector.
+    """Encode one OHLC(V) window into a flat feature vector of shape (window * D,).
 
-    Features per bar: rel_open, rel_high, rel_low, rel_close (all ATR-normalised)
-    and body_ratio * body_ratio_weight.  The weight compensates for body_ratio's
-    natural scale of [-1, 1] vs the much larger ATR-normalised range.
+    Base Features per bar (5 dims):
+    - rel_open, rel_high, rel_low, rel_close (ATR-normalised relative to window[0].close)
+    - body_ratio * body_ratio_weight
+
+    Optional Microstructure extensions:
+    - rel_volume (normalized relative volume intensity)
+    - fvg_bias, nearest_fvg_dist (Fair Value Gap active state)
     """
     window = df.iloc[start : end + 1]
     if window.empty:
@@ -310,7 +395,24 @@ def encode_window(
         * body_ratio_weight
     )
 
-    encoded = np.column_stack([rel_open, rel_high, rel_low, rel_close, body_ratio])
+    feature_cols = [rel_open, rel_high, rel_low, rel_close, body_ratio]
+
+    if use_volume:
+        if "volume" in window.columns and (window["volume"] > 0).any():
+            vol_arr = window["volume"].to_numpy(dtype=float)
+            med_vol = np.median(vol_arr[vol_arr > 0]) if np.any(vol_arr > 0) else 1.0
+            rel_vol = np.clip((vol_arr / (med_vol + 1e-8) - 1.0), -3.0, 5.0) * volume_weight
+        else:
+            rel_vol = np.zeros(len(window), dtype=float)
+        feature_cols.append(rel_vol)
+
+    if use_fvg:
+        fvg_res = detect_unmitigated_fvg(window, atr)
+        bias_seq = np.full(len(window), fvg_res.net_fvg_bias * fvg_weight, dtype=float)
+        dist_seq = np.full(len(window), fvg_res.nearest_fvg_dist * fvg_weight, dtype=float)
+        feature_cols.extend([bias_seq, dist_seq])
+
+    encoded = np.column_stack(feature_cols)
     if not np.isfinite(encoded).all():
         raise ValueError("Window encoding contains non-finite values.")
 
@@ -374,8 +476,48 @@ def make_quantiles(paths: np.ndarray) -> pd.DataFrame:
     for level in levels:
         values = np.quantile(paths, level, axis=0)
         row = {"quantile": level}
-        row.update({f"t+{step}": value for step, value in enumerate(values)})
+        row.update({f"t+{step}": float(value) for step, value in enumerate(values)})
         rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def make_weighted_quantiles(
+    paths: np.ndarray,
+    distances: np.ndarray,
+    tau: float | None = None,
+) -> pd.DataFrame:
+    """Compute distance-weighted quantiles using Softmax exponential decay weights."""
+    n_samples, n_steps = paths.shape
+    if n_samples == 0:
+        return pd.DataFrame()
+
+    dists = np.asarray(distances, dtype=float)
+    if tau is None or tau <= 0:
+        med_d = np.median(dists)
+        tau = float(med_d) if med_d > 1e-4 else 1.0
+
+    # Softmax weights: higher weight for smaller distances
+    norm_d = (dists - np.min(dists)) / tau
+    exp_w = np.exp(-norm_d)
+    weights = exp_w / np.sum(exp_w)
+
+    levels = [0.10, 0.25, 0.50, 0.75, 0.90]
+    rows = []
+    for level in levels:
+        quant_vals = np.empty(n_steps, dtype=float)
+        for t in range(n_steps):
+            vals = paths[:, t]
+            sorter = np.argsort(vals)
+            sorted_vals = vals[sorter]
+            sorted_weights = weights[sorter]
+            cum_w = np.cumsum(sorted_weights)
+            # Find interpolated value at quantile level
+            quant_vals[t] = float(np.interp(level, cum_w, sorted_vals))
+
+        row = {"quantile": level}
+        row.update({f"t+{step}": float(val) for step, val in enumerate(quant_vals)})
+        rows.append(row)
+
     return pd.DataFrame(rows)
 
 
@@ -417,3 +559,6 @@ def _validate_config(config: SimilarityConfig) -> None:
         raise ValueError("--top-k must be at least 1.")
     if config.atr_period < 2:
         raise ValueError("--atr-period must be at least 2.")
+    if config.min_valid_samples < 2:
+        raise ValueError("--min-valid-samples must be at least 2.")
+

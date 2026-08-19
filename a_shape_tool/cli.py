@@ -79,6 +79,33 @@ def main() -> None:
         help="Number of Euclidean pre-filtered candidates to re-rank with DTW. Default: 200.",
     )
     parser.add_argument(
+        "--min-valid-samples",
+        type=int,
+        default=15,
+        help="Minimum required historical matches for statistically valid confidence. Default: 15.",
+    )
+    parser.add_argument(
+        "--max-distance-cutoff",
+        type=float,
+        default=None,
+        help="Maximum allowable DTW/Euclidean distance before discarding outlier candidate. Default: None.",
+    )
+    parser.add_argument(
+        "--use-vp",
+        action="store_true",
+        help="Enable Volume Profile (POC / VAH / VAL / Volume Skew) features in window encoding.",
+    )
+    parser.add_argument(
+        "--use-fvg",
+        action="store_true",
+        help="Enable Fair Value Gap (3-bar price imbalance & active void) features in window encoding.",
+    )
+    parser.add_argument(
+        "--no-distance-weighting",
+        action="store_true",
+        help="Disable Softmax distance weighting for quantile estimation.",
+    )
+    parser.add_argument(
         "--backtest",
         action="store_true",
         help="Run walk-forward evaluation instead of one latest-window report.",
@@ -144,6 +171,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+
     if args.make_sample:
         sample_path = make_sample_ohlc(args.make_sample, rows=args.rows)
         print(f"Wrote sample OHLC CSV: {sample_path}")
@@ -168,6 +196,11 @@ def main() -> None:
         use_dtw=not args.no_dtw,
         dtw_warping_window=args.dtw_warping_window,
         dtw_rerank_k=args.dtw_rerank_k,
+        min_valid_samples=args.min_valid_samples,
+        max_distance_cutoff=args.max_distance_cutoff,
+        use_distance_weighting=not args.no_distance_weighting,
+        use_volume=args.use_vp,
+        use_fvg=args.use_fvg,
     )
 
     output_dir = Path(args.output_dir)
@@ -286,26 +319,38 @@ def main() -> None:
         )
 
         summary = backtest.summary
-        print("Walk-forward evaluation done.")
+        print("=" * 60)
+        print("Walk-forward Evaluation Completed")
+        print("=" * 60)
         print(f"Trials: {summary['trials']} (skipped {summary['skipped']})")
-        print(f"Median MAE, similarity: {summary['median_mae_similarity'] * 100.0:.3f}%")
-        print(f"Median MAE, state baseline: {summary['median_mae_state_baseline'] * 100.0:.3f}%")
-        print(f"MAE improvement: {summary['median_mae_improvement_pct'] * 100.0:.2f}%")
-        print(f"Spearman IC: {summary['spearman_ic']:.4f}")
-        print(f"25%-75% coverage: {summary['coverage_25_75'] * 100.0:.2f}%")
-        print(f"10%-90% coverage: {summary['coverage_10_90'] * 100.0:.2f}%")
-        print(f"Trades from conservative q25/q75 rule: {summary['trades']}")
+        print(f"Median MAE (Similarity):     {summary['median_mae_similarity'] * 100.0:.3f}%")
+        print(f"Median MAE (State Baseline): {summary['median_mae_state_baseline'] * 100.0:.3f}%")
+        print(f"MAE Improvement:             {summary['median_mae_improvement_pct'] * 100.0:+.2f}%")
+        print("-" * 60)
+        print("Signal Robustness & Information Ratio (IC_IR):")
+        print(f"  Spearman IC:       {summary['spearman_ic']:.4f} (p-value: {summary.get('spearman_p_value', 0.0):.4e})")
+        print(f"  IC_IR (Mean/Std):  {summary.get('ic_ir', 0.0):.3f}")
+        print(f"  IC t-statistic:    {summary.get('ic_t_stat', 0.0):.2f}")
+        print(f"  High-Conf IC:      {summary.get('high_confidence_ic', 0.0):.4f} (Ratio: {summary.get('high_confidence_ratio', 1.0):.1%})")
+        print("-" * 60)
+        print(f"Distribution Calibration: 25%-75%={summary['coverage_25_75'] * 100.0:.1f}% | 10%-90%={summary['coverage_10_90'] * 100.0:.1f}%")
+        print(f"Direction Hit Rate:       {summary['direction_hit_rate'] * 100.0:.1f}% (vs State Base: {summary['state_direction_hit_rate'] * 100.0:.1f}%)")
+        print("-" * 60)
+        print(f"Standard Rule Trades:     {summary['trades']} (Rate: {summary.get('trade_rate', 0.0):.1%})")
         if summary["trades"] > 0:
-            print(f"Average trade return: {summary['avg_trade_return'] * 100.0:.3f}%")
-            print(f"Trade win rate: {summary['trade_win_rate'] * 100.0:.2f}%")
-            print(f"Max drawdown: {summary['max_drawdown'] * 100.0:.2f}%")
+            print(f"  Avg Return: {summary['avg_trade_return'] * 100.0:.3f}% | Win Rate: {summary['trade_win_rate'] * 100.0:.1f}% | Profit Factor: {summary['profit_factor']:.2f} | Max DD: {summary['max_drawdown'] * 100.0:.2f}%")
+        print(f"Asymmetric Rule Trades:   {summary.get('asym_trades', 0)}")
+        if summary.get('asym_trades', 0) > 0:
+            print(f"  Asym Win Rate: {summary['asym_win_rate'] * 100.0:.1f}% | Profit Factor: {summary['asym_profit_factor']:.2f} | Max DD: {summary['asym_max_drawdown'] * 100.0:.2f}%")
+        print("=" * 60)
+
         skip_reasons = backtest.skip_reasons
         if any(skip_reasons.values()):
             reasons_str = ", ".join(f"{k}={v}" for k, v in skip_reasons.items() if v > 0)
             print(f"Skip reasons: {reasons_str}")
-        print(f"Trials: {trials_path}")
-        print(f"Buckets: {buckets_path}")
-        print(f"Summary: {summary_path}")
+        print(f"Trials CSV:   {trials_path}")
+        print(f"Buckets CSV:  {buckets_path}")
+        print(f"Summary JSON: {summary_path}")
         return
 
     result = run_similarity(df, config)
@@ -314,7 +359,7 @@ def main() -> None:
 
     image_path = plot_distribution(result, output_dir / "distribution.png")
     diagnostics_path = plot_similarity_diagnostics(df, result, output_dir / "similarity_diagnostics.png")
-    
+
     # Generate the premium raw OHLC candlestick plot for the top matches!
     ohlc_path = output_dir / "top_matches_ohlc.png"
     plot_ohlc_candles_grid(
@@ -326,7 +371,7 @@ def main() -> None:
         title=f"Similarity Query vs Top Matches (window={config.window}, horizon={config.horizon})",
         query_index=int(result.query["query_end_index"]),
     )
-    
+
     report_path = write_html_report(result, image_path, output_dir / "report.html", diagnostics_path)
     matches_path = output_dir / "matches.csv"
     paths_path = output_dir / "paths.csv"
@@ -334,25 +379,37 @@ def main() -> None:
     result.matches.to_csv(matches_path, index=False)
     result.paths.to_csv(paths_path, index=False)
     result.quantiles.to_csv(quantiles_path, index=False)
+    if result.weighted_quantiles is not None:
+        result.weighted_quantiles.to_csv(output_dir / "weighted_quantiles.csv", index=False)
 
     terminal_column = f"t+{config.horizon}"
     terminal = result.quantiles[["quantile", terminal_column]].copy()
     terminal[terminal_column] = terminal[terminal_column] * 100.0
 
     print("Done.")
-    print(f"Timeframe: {result.query['timeframe']}")
-    print(f"Query state: {result.query['state']}")
-    print(f"Query end: {result.query['query_end_time']}")
-    print(f"Matches found: {result.query['top_k_found']} / {result.query['top_k_requested']}")
-    print("Terminal return quantiles:")
+    print(f"Timeframe:         {result.query['timeframe']}")
+    print(f"Query state:       {result.query['state']}")
+    print(f"Query end:         {result.query['query_end_time']}")
+    print(f"Confidence Level:  [{result.query.get('confidence_level', 'HIGH')}] (Matches: {result.query['top_k_found']} / {result.query['top_k_requested']})")
+    print(f"Match Distance:    Mean={result.query.get('mean_match_distance', 0.0):.2f}, Min={result.query.get('min_match_distance', 0.0):.2f}")
+    print("Terminal return quantiles (Raw):")
     for _, row in terminal.iterrows():
         print(f"  {row['quantile']:.0%}: {row[terminal_column]:.3f}%")
-    print(f"Chart: {image_path}")
-    print(f"Candlestick grid: {ohlc_path}")
+
+    if result.weighted_quantiles is not None:
+        weighted_terminal = result.weighted_quantiles[["quantile", terminal_column]].copy()
+        weighted_terminal[terminal_column] = weighted_terminal[terminal_column] * 100.0
+        print("Terminal return quantiles (Softmax Distance-Weighted):")
+        for _, row in weighted_terminal.iterrows():
+            print(f"  {row['quantile']:.0%}: {row[terminal_column]:.3f}%")
+
+    print(f"Chart:                  {image_path}")
+    print(f"Candlestick grid:       {ohlc_path}")
     print(f"Similarity diagnostics: {diagnostics_path}")
-    print(f"Matches: {matches_path}")
-    print(f"Report: {report_path}")
+    print(f"Matches:                {matches_path}")
+    print(f"Report:                 {report_path}")
 
 
 if __name__ == "__main__":
     main()
+
