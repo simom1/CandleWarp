@@ -117,8 +117,10 @@ python3 -m a_shape_tool.cli \
   --min-history 600 \
   --stride 25 \
   --cost-bps 2 \
+  --n-jobs -1 \
   --output-dir output_backtest
 ```
+
 
 ### 核心评估指标
 - **中位数误差改善度 (MAE Improvement)**：形态中位数预测误差相比于“同市场状态、不看形态”基准的降低幅度。

@@ -117,8 +117,10 @@ python3 -m a_shape_tool.cli \
   --min-history 600 \
   --stride 25 \
   --cost-bps 2 \
+  --n-jobs -1 \
   --output-dir output_backtest
 ```
+
 
 ### Output Evaluation Metrics
 - **Median MAE Improvement**: Similarity prediction error vs. state-baseline error.
