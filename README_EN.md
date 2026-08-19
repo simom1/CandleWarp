@@ -12,7 +12,7 @@
 [![Quant Rigour](https://img.shields.io/badge/Walk--Forward-Zero%20Lookahead-purple.svg)](#-walk-forward-validation)
 
 *Answer the definitive quantitative question without directional bias:*  
-**"When similar candlestick patterns appeared in history, what did the subsequent $N$-bar path distribution look like?"**
+**"When similar candlestick patterns appeared in history, what did the subsequent N-bar path distribution look like?"**
 
 </div>
 
@@ -20,12 +20,12 @@
 
 ## 🌟 Highlights
 
-- **⚡ Sub-Millisecond 2D Sakoe-Chiba DTW**: JIT-compiled with Numba delivering **>300x acceleration** (`~0.009ms` per match) with $O(N)$ `LB_Keogh` lower-bounding pruning and automatic NumPy fallback.
+- **⚡ Sub-Millisecond 2D Sakoe-Chiba DTW**: JIT-compiled with Numba delivering **>300x acceleration** (`~0.009ms` per match) with LB_Keogh lower-bounding pruning and automatic NumPy fallback.
 - **📏 Dimensionless Relative Space**: OHLC windows are projected into ATR-normalized price coordinates and body-ratio geometry, eliminating cross-era price level and volatility scale distortions.
 - **🔍 Volume Profile & FVG Modalities**: Incorporates Point of Control (POC), Value Area (VAH/VAL), Volume Skewness, and Fair Value Gaps (3-bar unmitigated liquidity voids).
-- **🛡️ Dual Confidence Gating**: Rejects low-confidence noise with minimum sample thresholds ($K_{min}$) and distance outlier cutoffs.
-- **🎯 Softmax Distance-Weighted Quantiles**: Replaces uniform sampling with distance-weighted probabilistic ribbons ($Q_{10}, Q_{25}, Q_{50}, Q_{75}, Q_{90}$).
-- **🔬 Zero-Lookahead Walk-Forward Engine**: Strictly causal rolling evaluation reporting Spearman IC, Information Ratio ($\mathrm{IC_{IR}}$), $t$-statistics, and asymmetric risk-reward expectancy.
+- **🛡️ Dual Confidence Gating**: Rejects low-confidence noise with minimum sample thresholds and distance outlier cutoffs.
+- **🎯 Softmax Distance-Weighted Quantiles**: Replaces uniform sampling with distance-weighted probabilistic ribbons (Q10, Q25, Q50, Q75, Q90).
+- **🔬 Zero-Lookahead Walk-Forward Engine**: Strictly causal rolling evaluation reporting Spearman IC, Information Ratio (IC_IR), t-statistics, and asymmetric risk-reward expectancy.
 
 ---
 
@@ -114,10 +114,17 @@ python3 -m a_shape_tool.cli \
 
 ### Output Evaluation Metrics
 - **Median MAE Improvement**: Similarity prediction error vs. state-baseline error.
-- **Spearman IC & Information Ratio ($\mathrm{IC_{IR}}$)**:
-  $$\mathrm{IC_{IR}} = \frac{\mathrm{Mean}(\mathrm{IC})}{\mathrm{Std}(\mathrm{IC})}, \quad t\text{-stat} = \mathrm{IC_{IR}} \times \sqrt{N}$$
+- **Spearman IC & Information Ratio (IC_IR)**:
+
+```math
+\mathrm{IC}_{\mathrm{IR}} = \frac{\mathrm{Mean}(\mathrm{IC})}{\mathrm{Std}(\mathrm{IC})}, \quad t = \mathrm{IC}_{\mathrm{IR}} \times \sqrt{N}
+```
+
 - **Asymmetric Expectancy Ratio**:
-  $$\mathrm{Asymmetry} = \frac{Q_{75} - Q_{50}}{Q_{50} - Q_{25}}$$
+
+```math
+\mathrm{Asymmetry} = \frac{Q_{75} - Q_{50}}{Q_{50} - Q_{25}}
+```
 
 ---
 
@@ -126,19 +133,27 @@ python3 -m a_shape_tool.cli \
 ### 1. Dimensionless Feature Representation
 For any OHLC window of length $W$ ending at bar $T$:
 
-$$\mathrm{rel\_open}_t = \frac{\mathrm{open}_t - \mathrm{close}_0}{\mathrm{ATR}_T}, \quad \mathrm{rel\_close}_t = \frac{\mathrm{close}_t - \mathrm{close}_0}{\mathrm{ATR}_T}$$
+```math
+\mathrm{Open}_{\mathrm{norm}}(t) = \frac{\mathrm{Open}(t) - \mathrm{Close}(0)}{\mathrm{ATR}(T)}, \quad \mathrm{Close}_{\mathrm{norm}}(t) = \frac{\mathrm{Close}(t) - \mathrm{Close}(0)}{\mathrm{ATR}(T)}
+```
 
-$$\mathrm{body\_ratio}_t = \frac{\mathrm{close}_t - \mathrm{open}_t}{\mathrm{high}_t - \mathrm{low}_t} \times w_{\mathrm{body}}$$
+```math
+\mathrm{BodyRatio}(t) = \frac{\mathrm{Close}(t) - \mathrm{Open}(t)}{\mathrm{High}(t) - \mathrm{Low}(t)} \times w_{\mathrm{body}}
+```
 
 ### 2. 2D Sakoe-Chiba DTW Distance
-Restricts warping path $p = (i, j)$ inside band $|i - j| \le w$:
+Restricts warping path inside band $|i - j| \le w$:
 
-$$D(i, j) = \| \mathbf{x}_i - \mathbf{y}_j \|_2 + \min \begin{cases} D(i-1, j) \\ D(i, j-1) \\ D(i-1, j-1) \end{cases}$$
+```math
+D(i, j) = \|\mathbf{x}_i - \mathbf{y}_j\|_2 + \min\left( D(i-1, j), D(i, j-1), D(i-1, j-1) \right)
+```
 
 ### 3. Softmax Distance-Weighted Quantiles
 Weights assigned to candidate path $k$ based on its DTW distance $d_k$:
 
-$$w_k = \frac{e^{-d_k / \tau}}{\sum_{m=1}^K e^{-d_m / \tau}}, \quad \tau = \mathrm{median}(d)$$
+```math
+w_k = \frac{\exp(-d_k / \tau)}{\sum_{m=1}^K \exp(-d_m / \tau)}, \quad \tau = \mathrm{median}(d)
+```
 
 ---
 

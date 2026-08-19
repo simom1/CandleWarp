@@ -12,7 +12,7 @@
 [![Quant Rigour](https://img.shields.io/badge/Walk--Forward-无未来函数-purple.svg)](#-walk-forward-滚动验证)
 
 *拒绝方向性主观臆测，回答量化交易的核心问题：*  
-**“历史上出现过类似形态时，后面 $N$ 根 K 线的走势分布究竟长什么样？”**
+**“历史上出现过类似形态时，后面 N 根 K 线的走势分布究竟长什么样？”**
 
 </div>
 
@@ -20,12 +20,12 @@
 
 ## 🌟 核心亮点
 
-- **⚡ 毫秒级 2D Sakoe-Chiba DTW 矩阵算子**：基于 Numba JIT 深度优化编译，单次匹配仅需 **`0.009ms`（加速超 330 倍）**，结合 $O(N)$ `LB_Keogh` 理论下界剪枝，支持海量 K 线秒级全局检索，内置 NumPy 优雅自动降级机制。
-- **📏 无量纲相对空间映射**：将 OHLC 窗口投影至 ATR 归一化价格坐标与 `body_ratio` 实体比例空间，消除不同历史时期、不同价格点位与波动率周期的绝对量纲失真。
+- **⚡ 毫秒级 2D Sakoe-Chiba DTW 矩阵算子**：基于 Numba JIT 深度优化编译，单次匹配仅需 **`0.009ms`（加速超 330 倍）**，结合 LB_Keogh 理论下界剪枝，支持海量 K 线秒级全局检索，内置 NumPy 优雅自动降级机制。
+- **📏 无量纲相对空间映射**：将 OHLC 窗口投影至 ATR 归一化价格坐标与实体比例空间，消除不同历史时期、不同价格点位与波动率周期的绝对量纲失真。
 - **🔍 Volume Profile (筹码分布) 与 FVG 因子增强**：不仅看“形”，更看“量”与“微观结构”，提取筹码峰 (POC)、70% 价值区 (VAH/VAL)、成交量偏度以及三根 K 线未回补流动性失衡区 (Fair Value Gap)。
-- **🛡️ 双重置信度闸门机制**：拒绝低置信度噪点匹配，设定最小有效样本阈值 ($K_{min}$) 与最大距离截断，杜绝弱相关样本强行凑数。
-- **🎯 Softmax 距离加权概率分位数**：用加权概率分布取代机械等权平均，生成更逼近真实物理路径的概率分位带（$Q_{10}, Q_{25}, Q_{50}, Q_{75}, Q_{90}$）。
-- **🔬 严谨无未来函数 Walk-Forward 验证**：严格时间因果隔离的滚动回测体系，全面评估 Spearman IC 秩相关系数、信息比率 ($\mathrm{IC_{IR}}$)、$t$ 显著性统计量以及不对称期望收益。
+- **🛡️ 双重置信度闸门机制**：拒绝低置信度噪点匹配，设定最小有效样本阈值与最大距离截断，杜绝弱相关样本强行凑数。
+- **🎯 Softmax 距离加权概率分位数**：用加权概率分布取代机械等权平均，生成更逼近真实物理路径的概率分位带（Q10, Q25, Q50, Q75, Q90）。
+- **🔬 严谨无未来函数 Walk-Forward 验证**：严格时间因果隔离的滚动回测体系，全面评估 Spearman IC 秩相关系数、信息比率 IC_IR、t 显著性统计量以及不对称期望收益。
 
 ---
 
@@ -114,11 +114,19 @@ python3 -m a_shape_tool.cli \
 
 ### 核心评估指标
 - **中位数误差改善度 (MAE Improvement)**：形态中位数预测误差相比于“同市场状态、不看形态”基准的降低幅度。
-- **Spearman 秩相关系数与信息比率 ($\mathrm{IC_{IR}}$)**：
-  $$\mathrm{IC_{IR}} = \frac{\mathrm{Mean}(\mathrm{IC})}{\mathrm{Std}(\mathrm{IC})}, \quad t\text{-stat} = \mathrm{IC_{IR}} \times \sqrt{N}$$
+- **Spearman 秩相关系数与信息比率 (IC_IR)**：
+
+```math
+\mathrm{IC}_{\mathrm{IR}} = \frac{\mathrm{Mean}(\mathrm{IC})}{\mathrm{Std}(\mathrm{IC})}, \quad t = \mathrm{IC}_{\mathrm{IR}} \times \sqrt{N}
+```
+
 - **不对称期望比率 (Asymmetric Expectancy Ratio)**：
-  $$\mathrm{Asymmetry} = \frac{Q_{75} - Q_{50}}{Q_{50} - Q_{25}}$$
-  仅在上行爆发空间显著大于下行潜在亏损时发出信号。
+
+```math
+\mathrm{Asymmetry} = \frac{Q_{75} - Q_{50}}{Q_{50} - Q_{25}}
+```
+
+仅在上行爆发空间显著大于下行潜在亏损时发出信号。
 
 ---
 
@@ -127,19 +135,27 @@ python3 -m a_shape_tool.cli \
 ### 1. 无量纲相对空间编码
 对于任意在第 $T$ 根 K 线结束、长度为 $W$ 的窗口：
 
-$$\mathrm{rel\_open}_t = \frac{\mathrm{open}_t - \mathrm{close}_0}{\mathrm{ATR}_T}, \quad \mathrm{rel\_close}_t = \frac{\mathrm{close}_t - \mathrm{close}_0}{\mathrm{ATR}_T}$$
+```math
+\mathrm{Open}_{\mathrm{norm}}(t) = \frac{\mathrm{Open}(t) - \mathrm{Close}(0)}{\mathrm{ATR}(T)}, \quad \mathrm{Close}_{\mathrm{norm}}(t) = \frac{\mathrm{Close}(t) - \mathrm{Close}(0)}{\mathrm{ATR}(T)}
+```
 
-$$\mathrm{body\_ratio}_t = \frac{\mathrm{close}_t - \mathrm{open}_t}{\mathrm{high}_t - \mathrm{low}_t} \times w_{\mathrm{body}}$$
+```math
+\mathrm{BodyRatio}(t) = \frac{\mathrm{Close}(t) - \mathrm{Open}(t)}{\mathrm{High}(t) - \mathrm{Low}(t)} \times w_{\mathrm{body}}
+```
 
 ### 2. 带有 Sakoe-Chiba 带约束的 2D-DTW 距离
-限制规整路径 $p = (i, j)$ 在时间漂移窗口 $|i - j| \le w$ 内：
+限制规整路径在时间漂移窗口 $|i - j| \le w$ 内：
 
-$$D(i, j) = \| \mathbf{x}_i - \mathbf{y}_j \|_2 + \min \begin{cases} D(i-1, j) \\ D(i, j-1) \\ D(i-1, j-1) \end{cases}$$
+```math
+D(i, j) = \|\mathbf{x}_i - \mathbf{y}_j\|_2 + \min\left( D(i-1, j), D(i, j-1), D(i-1, j-1) \right)
+```
 
 ### 3. Softmax 距离加权概率分位数
 根据各候选历史路径与当前形态的 DTW 距离 $d_k$ 赋予 Softmax 概率衰减权重：
 
-$$w_k = \frac{e^{-d_k / \tau}}{\sum_{m=1}^K e^{-d_m / \tau}}, \quad \tau = \mathrm{median}(d)$$
+```math
+w_k = \frac{\exp(-d_k / \tau)}{\sum_{m=1}^K \exp(-d_m / \tau)}, \quad \tau = \mathrm{median}(d)
+```
 
 ---
 
